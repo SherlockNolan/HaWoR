@@ -36,7 +36,7 @@ def camera_marker_geometry(radius, height):
     return vertices, faces, face_colors
 
 
-def run_vis2_on_video(res_dict, res_dict2, output_pth, focal_length, image_names, R_c2w=None, t_c2w=None, interactive=True):
+def run_vis2_on_video(res_dict, res_dict2, output_pth, focal_length, image_names, R_c2w=None, t_c2w=None, interactive=False):
     
     img0 = cv2.imread(image_names[0])
     height, width, _ = img0.shape
@@ -210,7 +210,7 @@ def run_vis2_on_video_cam(res_dict, res_dict2, output_pth, focal_length, image_n
     data = viewer_utils.ViewerData(Rt, K, cols, rows, imgnames=image_names)
     batch = (meshes, data)
 
-    viewer = viewer_utils.ARCTICViewer(interactive=True, size=(vis_w, vis_h))
+    viewer = viewer_utils.ARCTICViewer(interactive=False, size=(vis_w, vis_h),  render_types=['video']) # 输出视频
     viewer.render_seq(batch, out_folder=os.path.join(output_pth, 'aitviewer'))
 
 def lookat_matrix(source_pos, target_pos, up):

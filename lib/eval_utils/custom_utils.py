@@ -77,6 +77,9 @@ def load_slam_cam(fpath):
     pred_camq = torch.tensor(pred_traj[:, 3:])
     R_c2w_sla = quaternion_to_matrix(pred_camq[:,[3,0,1,2]])
     R_w2c_sla = R_c2w_sla.transpose(-1, -2)
+    # 将 R 和 t 都转换为 float32 精度
+    R_w2c_sla = R_w2c_sla.float()
+    t_c2w_sla = t_c2w_sla.float()
     t_w2c_sla = -torch.einsum("bij,bj->bi", R_w2c_sla, t_c2w_sla)
     return R_w2c_sla, t_w2c_sla, R_c2w_sla, t_c2w_sla
 

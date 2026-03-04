@@ -15,6 +15,15 @@ from lib.vis.run_vis2 import run_vis2_on_video, run_vis2_on_video_cam
 
 
 if __name__ == '__main__':
+    """
+export MGLW_WINDOW=moderngl_window.context.headless.Window
+export PYOPENGL_PLATFORM=egl
+# export QT_QPA_PLATFORM=offscreen
+
+# xvfb-run -a python demo.py --video_path="example/factory001_worker001_00000.mp4" --vis_mode world
+xvfb-run -a python demo.py --video_path="example/video_0.mp4" --vis_mode cam
+xvfb-run -a python demo.py --video_path="example/factory001_worker001_00000.mp4" --vis_mode cam
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--img_focal", type=float)
     parser.add_argument("--video_path", type=str, default='example/video_0.mp4')

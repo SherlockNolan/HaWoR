@@ -83,7 +83,7 @@ class ARCTICViewer:
     def __init__(
         self,
         render_types=["rgb", "depth", "mask"],
-        interactive=True,
+        interactive=False,
         size=(2024, 2024),
     ):
         if not interactive:

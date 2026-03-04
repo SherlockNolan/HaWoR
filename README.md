@@ -2,6 +2,18 @@
 
 # HaWoR: World-Space Hand Motion Reconstruction from Egocentric Videos
 
+**使用**`pip install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@stable#egg=pytorch3d`这个指令来安装`pytorch3d`！同时我已经更新到cu124版本的torch！
+
+chumpy同理`pip install --no-build-isolation git+https://github.com/mattloper/chumpy`
+
+mmcv单独处理，之前的版本太老了 `pip install mmcv==2.0.0 -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html`
+
+还需要
+```bash
+apt update
+apt install ffmeg
+```
+
 [Jinglei Zhang]()<sup>1</sup> &emsp; [Jiankang Deng](https://jiankangdeng.github.io/)<sup>2</sup> &emsp; [Chao Ma](https://scholar.google.com/citations?user=syoPhv8AAAAJ&hl=en)<sup>1</sup> &emsp; [Rolandos Alexandros Potamias](https://rolpotamias.github.io)<sup>2</sup> &emsp;  
 
 <sup>1</sup>Shanghai Jiao Tong University, China
