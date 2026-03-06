@@ -364,4 +364,65 @@ def hawor_infiller(args, start_idx, end_idx, frame_chunks_all):
     joblib.dump([pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid], save_path)
     return pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid
 
-    
+
+def hawor_infiller_plain(args, start_idx, end_idx, frame_chunks_all):
+    """
+    hawor_infiller 的简化版本：仅执行相机空间 → 世界空间的转换，
+    跳过 Infiller（TransformerModel）对缺失帧的插值补全。
+    缺失帧对应的 pred_valid 保持为 0，不进行任何填充。
+
+    接口与 hawor_infiller 完全一致：
+        pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = \
+            hawor_infiller_plain(args, start_idx, end_idx, frame_chunks_all)
+    """
+    file = args.video_path
+    video_root = os.path.dirname(file)
+    video = os.path.basename(file).split('.')[0]
+    seq_folder = os.path.join(video_root, video)
+    img_folder = f"{video_root}/{video}/extracted_images"
+
+    imgfiles = np.array(natsorted(glob(f'{img_folder}/*.jpg')))
+
+    fpath = os.path.join(seq_folder, f"SLAM/hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
+    R_w2c_sla_all, t_w2c_sla_all, R_c2w_sla_all, t_c2w_sla_all = load_slam_cam(fpath)
+
+    pred_trans = torch.zeros(2, len(imgfiles), 3)
+    pred_rot = torch.zeros(2, len(imgfiles), 3)
+    pred_hand_pose = torch.zeros(2, len(imgfiles), 45)
+    pred_betas = torch.zeros(2, len(imgfiles), 10)
+    pred_valid = torch.zeros((2, pred_betas.size(1)))
+
+    # 相机空间 → 世界空间，仅处理有检测结果的帧
+    tid = [0, 1]
+    for k, idx in enumerate(tid):
+        frame_chunks = frame_chunks_all[idx]
+
+        if len(frame_chunks) == 0:
+            continue
+
+        for frame_ck in frame_chunks:
+            print(f"from frame {frame_ck[0]} to {frame_ck[-1]}")
+            pred_path = os.path.join(seq_folder, 'cam_space', str(idx), f"{frame_ck[0]}_{frame_ck[-1]}.json")
+            with open(pred_path, "r") as f:
+                pred_dict = json.load(f)
+            data_out = {
+                k: torch.tensor(v) for k, v in pred_dict.items()
+            }
+
+            R_c2w_sla = R_c2w_sla_all[frame_ck]
+            t_c2w_sla = t_c2w_sla_all[frame_ck]
+
+            data_world = cam2world_convert(R_c2w_sla, t_c2w_sla, data_out, 'right' if idx > 0 else 'left')
+
+            pred_trans[[idx], frame_ck] = data_world["init_trans"]
+            pred_rot[[idx], frame_ck] = data_world["init_root_orient"]
+            pred_hand_pose[[idx], frame_ck] = data_world["init_hand_pose"].flatten(-2)
+            pred_betas[[idx], frame_ck] = data_world["init_betas"]
+            pred_valid[[idx], frame_ck] = 1
+
+    pred_valid = (pred_valid > 0).numpy()
+
+    save_path = os.path.join(seq_folder, "world_space_res_plain.pth")
+    joblib.dump([pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid], save_path)
+    return pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid
+

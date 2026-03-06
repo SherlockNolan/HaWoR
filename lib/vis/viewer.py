@@ -169,6 +169,83 @@ class ARCTICViewer:
         self.v = v
 
 
+class ARCTICViewerHeadless:
+    def __init__(
+        self,
+        render_types=["rgb", "depth", "mask"],
+        interactive=False,
+        size=(2024, 2024),
+    ):
+        # self.layers = layers
+        self.render_types = render_types
+
+    def view_fn_headless(self, num_iter, out_folder):
+
+        logger.info("Rendering to video")
+        if "video" in self.render_types:
+            vid_p = op.join(out_folder, "video.mp4")
+            v.save_video(video_dir=vid_p)
+            return 
+
+        pbar = tqdm(range(num_iter))
+        for fidx in pbar:
+            out_rgb = op.join(out_folder, "images", f"rgb/{fidx:04d}.png")
+            out_mask = op.join(out_folder, "images", f"mask/{fidx:04d}.png")
+            out_depth = op.join(out_folder, "images", f"depth/{fidx:04d}.npy")
+
+            # render RGB, depth, segmentation masks
+            if "rgb" in self.render_types:
+                v.export_frame(out_rgb)
+            if "depth" in self.render_types:
+                os.makedirs(op.dirname(out_depth), exist_ok=True)
+                render_depth(v, out_depth)
+            if "mask" in self.render_types:
+                os.makedirs(op.dirname(out_mask), exist_ok=True)
+                render_mask(v, out_mask)
+            v.scene.next_frame()
+        logger.info(f"Exported to {out_folder}")
+
+    @abstractmethod
+    def load_data(self):
+        pass
+
+    def check_format(self, batch):
+        meshes_all, data = batch
+        assert isinstance(meshes_all, dict)
+        assert len(meshes_all) > 0
+        for mesh in meshes_all.values():
+            assert isinstance(mesh, Meshes)
+        assert isinstance(data, ViewerData)
+
+    def render_seq(self, batch, out_folder="./render_out", floor_y=0):
+        meshes_all, data = batch
+        self.setup_viewer(data, floor_y)
+        for mesh in meshes_all.values():
+            self.v.scene.add(mesh)
+        if self.interactive:
+            self.view_interactive()
+        else:
+            num_iter = data["num_frames"]
+            self.view_fn_headless(num_iter, out_folder)
+
+    def setup_viewer(self, data, floor_y):
+        v = self.v
+        fps = 30
+        if "imgnames" in data:
+            setup_billboard(data, v)
+
+        # camera.show_path()
+        v.run_animations = True  # autoplay
+        v.run_animations = False  # autoplay
+        v.playback_fps = fps
+        v.scene.fps = fps
+        v.scene.origin.enabled = False
+        v.scene.floor.enabled = False
+        v.auto_set_floor = False
+        # v.scene.camera.position = np.array((0.0, 0.0, 0))
+        self.v = v
+
+
 def dist2vc(dist_ro, dist_lo, dist_o, _cmap, tf_fn=None):
     if tf_fn is not None:
         exp_map = tf_fn
