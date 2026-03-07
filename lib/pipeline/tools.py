@@ -23,7 +23,7 @@ def detect_track(imgfiles, thresh=0.5):
     hand_det_model = YOLO('./weights/external/detector.pt')
 
     # Run
-    boxes_ = []
+    boxes = []
     tracks = {}
     for t, imgpath in enumerate(tqdm(imgfiles)):
         img_cv2 = cv2.imread(imgpath)
@@ -70,9 +70,9 @@ def detect_track(imgfiles, thresh=0.5):
                         elif handedness[[idx]] == 0:
                             find_left = True
     tracks = np.array(tracks, dtype=object)
-    boxes_ = np.array(boxes_, dtype=object)
+    boxes = np.array(boxes, dtype=object)
 
-    return boxes_, tracks
+    return boxes, tracks
 
 
 def parse_chunks(frame, boxes, min_len=16):

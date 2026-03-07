@@ -36,6 +36,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hawor.utils.process import get_mano_faces, run_mano, run_mano_left
 from hawor.utils.rotation import rotation_matrix_to_angle_axis
 from hawor_pipeline_vitra import HaworPipeline
+from scripts.scripts_test_video.detect_track_video import detect_track_video
+from scripts.scripts_test_video.hawor_slam import hawor_slam
+from lib.eval_utils.custom_utils import load_slam_cam
 from lib.vis.run_vis2 import render_hand_results
 
 
@@ -208,14 +211,35 @@ def _recon_results_to_tensors(
     return right_dict, left_dict, r_valid, l_valid
 
 
-def _apply_coord_transform(right_dict: dict, left_dict: dict) -> tuple[dict, dict]:
+def _apply_coord_transform(
+    right_dict: dict,
+    left_dict: dict,
+    R_c2w_sla_all: torch.Tensor | None = None,
+    t_c2w_sla_all: torch.Tensor | None = None,
+) -> tuple:
     """
     对双手顶点施加绕 X 轴 180° 的旋转（与 reconstruct.py / demo.py 保持一致）。
-    在没有 SLAM 轨迹的纯视觉估计场景下，仅对顶点变换。
+
+    - 若提供 SLAM 位姿，则同时返回变换后的 R/t（含 w2c / c2w）。
+    - 若未提供，则仅变换顶点并返回 (right_dict, left_dict)。
     """
     R_x = _R_X
+
+    if R_c2w_sla_all is not None and t_c2w_sla_all is not None:
+        R_c2w_sla_all = torch.einsum("ij,njk->nik", R_x, R_c2w_sla_all)
+        t_c2w_sla_all = torch.einsum("ij,nj->ni", R_x, t_c2w_sla_all)
+        R_w2c_sla_all = R_c2w_sla_all.transpose(-1, -2)
+        t_w2c_sla_all = -torch.einsum("bij,bj->bi", R_w2c_sla_all, t_c2w_sla_all)
+
     left_dict["vertices"]  = torch.einsum("ij,btnj->btni", R_x, left_dict["vertices"].cpu())
     right_dict["vertices"] = torch.einsum("ij,btnj->btni", R_x, right_dict["vertices"].cpu())
+
+    if R_c2w_sla_all is not None and t_c2w_sla_all is not None:
+        return (
+            right_dict, left_dict,
+            R_w2c_sla_all, t_w2c_sla_all,
+            R_c2w_sla_all, t_c2w_sla_all,
+        )
     return right_dict, left_dict
 
 
@@ -257,6 +281,14 @@ class VitraReconstructor:
             model_path    = model_path,
             detector_path = detector_path,
             device        = device,
+        )
+
+    def _make_args(self, video_path: str, img_focal: float | None):
+        import types
+        return types.SimpleNamespace(
+            video_path=video_path,
+            input_type="file",
+            img_focal=img_focal,
         )
 
     # ------------------------------------------------------------------
@@ -317,7 +349,7 @@ class VitraReconstructor:
         os.makedirs(output_dir, exist_ok=True)
 
         # ── Step 1: 读取视频帧 ───────────────────────────────────────────
-        print("[VITRA] Step 1/3 — Loading video frames")
+        print("[VITRA] Step 1/4 — Loading video frames")
         frames, focal_estimated = _load_video_frames(video_path)
         num_frames = len(frames)
         if img_focal is None:
@@ -325,7 +357,7 @@ class VitraReconstructor:
         print(f"[VITRA]   frames={num_frames}, img_focal={img_focal:.1f}")
 
         # ── Step 2: 检测 + 追踪 + 运动估计 ──────────────────────────────
-        print("[VITRA] Step 2/3 — HaworPipeline (detect + track + motion estimation)")
+        print("[VITRA] Step 2/4 — HaworPipeline (detect + track + motion estimation)")
         recon_results = self.pipeline.recon(
             images       = frames,
             img_focal    = img_focal,
@@ -333,15 +365,56 @@ class VitraReconstructor:
             single_image = single_image,
         )
 
-        # ── Step 3: 构建双手网格 ─────────────────────────────────────────
-        print("[VITRA] Step 3/3 — Building hand meshes (MANO forward pass)")
+        # ── Step 3: SLAM（按需执行） ─────────────────────────────────────
+        print("[VITRA] Step 3/4 — SLAM")
+        args = self._make_args(video_path, img_focal)
+        start_idx, end_idx, seq_folder_from_video, imgfiles = detect_track_video(args)
+
+        slam_path = os.path.join(
+            seq_folder_from_video,
+            f"SLAM/hawor_slam_w_scale_{start_idx}_{end_idx}.npz"
+        )
+        mask_path = os.path.join(
+            seq_folder_from_video,
+            f"tracks_{start_idx}_{end_idx}",
+            "model_masks.npy",
+        )
+
+        slam_available = False
+        if os.path.exists(slam_path):
+            slam_available = True
+        else:
+            if os.path.exists(mask_path):
+                hawor_slam(args, start_idx, end_idx)
+                slam_available = os.path.exists(slam_path)
+            else:
+                print(
+                    f"[VITRA] SLAM skip: missing {mask_path}. "
+                    "请先产出 model_masks.npy（例如通过原脚本管线），"
+                    "当前将使用 Identity 相机位姿。"
+                )
+
+        if slam_available:
+            R_w2c_sla_all, t_w2c_sla_all, R_c2w_sla_all, t_c2w_sla_all = load_slam_cam(slam_path)
+        else:
+            R_c2w_sla_all = torch.eye(3).unsqueeze(0).repeat(num_frames, 1, 1)
+            t_c2w_sla_all = torch.zeros(num_frames, 3)
+            R_w2c_sla_all = R_c2w_sla_all.transpose(-1, -2)
+            t_w2c_sla_all = -torch.einsum("bij,bj->bi", R_w2c_sla_all, t_c2w_sla_all)
+
+        # ── Step 4: 构建双手网格 ─────────────────────────────────────────
+        print("[VITRA] Step 4/4 — Building hand meshes (MANO forward pass)")
         faces_right, faces_left = _build_faces()
         right_dict, left_dict, valid_right, valid_left = _recon_results_to_tensors(
             recon_results, num_frames, faces_right, faces_left
         )
 
-        # 坐标系对齐（绕 X 轴 180°）
-        right_dict, left_dict = _apply_coord_transform(right_dict, left_dict)
+        # 坐标系对齐（绕 X 轴 180°）并同步变换相机位姿
+        (right_dict, left_dict,
+         R_w2c_sla_all, t_w2c_sla_all,
+         R_c2w_sla_all, t_c2w_sla_all) = _apply_coord_transform(
+            right_dict, left_dict, R_c2w_sla_all, t_c2w_sla_all
+        )
 
         # ── 整理返回结果 ─────────────────────────────────────────────────
         result = dict(
@@ -353,7 +426,12 @@ class VitraReconstructor:
             frames        = frames,
             num_frames    = num_frames,
             seq_folder    = output_dir,
+            imgfiles      = imgfiles,
             recon_results = recon_results,
+            R_c2w         = R_c2w_sla_all,
+            t_c2w         = t_c2w_sla_all,
+            R_w2c         = R_w2c_sla_all,
+            t_w2c         = t_w2c_sla_all,
             rendered_video= None,
         )
 
@@ -396,22 +474,19 @@ class VitraReconstructor:
         - world 模式：相机位姿设为 Identity（相机始终在原点）
         - cam 模式：相机位姿同样设为 Identity（手部顶点已在相机坐标系中）
         """
-        T = vis_end - vis_start
-
-        # 构造 Identity 相机轨迹
-        R_identity = torch.eye(3).unsqueeze(0).expand(T, -1, -1)  # (T,3,3)
-        t_zero     = torch.zeros(T, 3)                            # (T,3)
-
-        # 为渲染生成图像路径列表（将 BGR 帧临时写到磁盘）
-        frame_dir = os.path.join(output_dir, "frames")
-        os.makedirs(frame_dir, exist_ok=True)
-        frames = result["frames"]
-        image_names = []
-        for i in range(vis_start, vis_end):
-            frame_path = os.path.join(frame_dir, f"{i:06d}.jpg")
-            if not os.path.exists(frame_path):
-                cv2.imwrite(frame_path, frames[i])
-            image_names.append(frame_path)
+        # 优先复用 detect_track_video 产生的 extracted_images，避免额外写盘
+        if "imgfiles" in result and result["imgfiles"] is not None and len(result["imgfiles"]) > 0:
+            image_names = list(result["imgfiles"][vis_start:vis_end])
+        else:
+            frame_dir = os.path.join(output_dir, "frames")
+            os.makedirs(frame_dir, exist_ok=True)
+            frames = result["frames"]
+            image_names = []
+            for i in range(vis_start, vis_end):
+                frame_path = os.path.join(frame_dir, f"{i:06d}.jpg")
+                if not os.path.exists(frame_path):
+                    cv2.imwrite(frame_path, frames[i])
+                image_names.append(frame_path)
 
         print(f"[VITRA] Rendering frames {vis_start} → {vis_end}  (mode={vis_mode})")
 
@@ -424,10 +499,10 @@ class VitraReconstructor:
             vis_start   = vis_start,
             vis_end     = vis_end,
             vis_mode    = vis_mode,
-            R_c2w       = R_identity,
-            t_c2w       = t_zero,
-            R_w2c       = R_identity,
-            t_w2c       = t_zero,
+            R_c2w       = result["R_c2w"],
+            t_c2w       = result["t_c2w"],
+            R_w2c       = result["R_w2c"],
+            t_w2c       = result["t_w2c"],
             video_stem  = video_stem,
         )
 

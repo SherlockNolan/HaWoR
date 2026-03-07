@@ -48,7 +48,15 @@ class TrackDatasetEval(Dataset):
         img_focal = self.img_focal
         img_center = self.img_center
 
-        img = cv2.imread(imgfile)[:,:,::-1]
+        # 支持 imgfile 为路径或 numpy 数组
+        if isinstance(imgfile, np.ndarray):
+            img = imgfile[:,:,::-1] # 我的pipeline传入的imgfile是img_ck是images_BGR中取出的，和cv2.imread()结果一样，所以同样要进行转换
+        else:
+            img = cv2.imread(imgfile)
+            if img is None:
+                raise FileNotFoundError(f"无法读取图像: {imgfile}")
+            img = img[:,:,::-1]
+
         if self.do_flip:
             img = img[:, ::-1, :]
             img_width = img.shape[1]
@@ -57,13 +65,13 @@ class TrackDatasetEval(Dataset):
                         [self.crop_size, self.crop_size], 
                         rot=0).astype('uint8')
         # cv2.imwrite('debug_crop.png', img_crop[:,:,::-1])
-        
+
         if self.normalization:
             img_crop = self.normalize_img(img_crop)
         else:
             img_crop = torch.from_numpy(img_crop)
         item['img'] = img_crop
-        
+
         if self.do_flip:
             # center[0] = img_width - center[0] - 1 
             item['do_flip'] = torch.tensor(1).float()
@@ -72,7 +80,6 @@ class TrackDatasetEval(Dataset):
         item['center'] = torch.tensor(center).float()
         item['img_focal'] = torch.tensor(img_focal).float()
         item['img_center'] = torch.tensor(img_center).float()
-        
 
         return item
 
