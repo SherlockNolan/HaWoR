@@ -343,6 +343,18 @@ def render_hand_results(
             return final_mp4
         return None
     except Exception as e:
-        print(f"[render_hand_results] Rendering failed: {e}")
+        print(f"[render_hand_results] Rendering failed: {e.__traceback__}")
+        note="""
+Please make sure you have a dispay for running. If you are runing this script on a server, please set environment virable like this:
+```
+export MGLW_WINDOW=moderngl_window.context.headless.Window
+export PYOPENGL_PLATFORM=egl
+```
+and run like this
+```
+xvfb-run -a python reconstruct.py --video_path example/factory001_worker001_00000.mp4 --output_dir ./results --rendering --vis_mode cam
+```
+        """
+        print(note)
         return None
 

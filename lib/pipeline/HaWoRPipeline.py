@@ -20,19 +20,21 @@ from torchvision.transforms import Resize
 from natsort import natsorted
 from natsort import natsorted
 from tqdm import tqdm
-
+import subprocess
 if torch.cuda.is_available():
     autocast = torch.cuda.amp.autocast
 else:
     class autocast:
         def __init__(self, enabled=True):
             pass
+
         def __enter__(self):
             pass
+
         def __exit__(self, *args):
             pass
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ultralytics import YOLO
+from ultralytics.models import YOLO
 import numpy as np
 import joblib
 from scripts.scripts_test_video.hawor_video import hawor_infiller_plain, hawor_infiller
@@ -59,8 +61,6 @@ from hawor.utils.process import block_print, enable_print
 from infiller.lib.model.network import TransformerModel
 from thirdparty.Metric3D.metric import Metric3D
 
-
-
 # ---------------------------------------------------------------------------
 # 面片常量（与 demo.py 保持一致）
 # ---------------------------------------------------------------------------
@@ -83,9 +83,9 @@ _FACES_NEW = np.array([
 
 # 绕 X 轴旋转 180° 的矩阵（坐标系对齐用）
 _R_X = torch.tensor([
-    [1,  0,  0],
-    [0, -1,  0],
-    [0,  0, -1],
+    [1, 0, 0],
+    [0, -1, 0],
+    [0, 0, -1],
 ], dtype=torch.float32)
 
 
@@ -111,10 +111,10 @@ def _build_hand_dicts(pred_trans, pred_rot, pred_hand_pose, pred_betas,
     # 右手
     hi = hand2idx["right"]
     pred_glob_r = run_mano(
-        pred_trans[hi:hi+1, vis_start:vis_end],
-        pred_rot[hi:hi+1, vis_start:vis_end],
-        pred_hand_pose[hi:hi+1, vis_start:vis_end],
-        betas=pred_betas[hi:hi+1, vis_start:vis_end],
+        pred_trans[hi:hi + 1, vis_start:vis_end],
+        pred_rot[hi:hi + 1, vis_start:vis_end],
+        pred_hand_pose[hi:hi + 1, vis_start:vis_end],
+        betas=pred_betas[hi:hi + 1, vis_start:vis_end],
     )
     right_dict = {
         "vertices": pred_glob_r["vertices"][0].unsqueeze(0),  # (1, T, N, 3)
@@ -124,10 +124,10 @@ def _build_hand_dicts(pred_trans, pred_rot, pred_hand_pose, pred_betas,
     # 左手
     hi = hand2idx["left"]
     pred_glob_l = run_mano_left(
-        pred_trans[hi:hi+1, vis_start:vis_end],
-        pred_rot[hi:hi+1, vis_start:vis_end],
-        pred_hand_pose[hi:hi+1, vis_start:vis_end],
-        betas=pred_betas[hi:hi+1, vis_start:vis_end],
+        pred_trans[hi:hi + 1, vis_start:vis_end],
+        pred_rot[hi:hi + 1, vis_start:vis_end],
+        pred_hand_pose[hi:hi + 1, vis_start:vis_end],
+        betas=pred_betas[hi:hi + 1, vis_start:vis_end],
     )
     left_dict = {
         "vertices": pred_glob_l["vertices"][0].unsqueeze(0),  # (1, T, N, 3)
@@ -164,8 +164,6 @@ def _apply_coord_transform(right_dict, left_dict,
             R_c2w_sla_all, t_c2w_sla_all)
 
 
-
-
 # ---------------------------------------------------------------------------
 # 核心类
 # ---------------------------------------------------------------------------
@@ -185,19 +183,19 @@ class HaWoRPipeline:
     """
 
     DEFAULT_CHECKPOINT = "./weights/hawor/checkpoints/hawor.ckpt"
-    DEFAULT_INFILLER   = "./weights/hawor/checkpoints/infiller.pt"
+    DEFAULT_INFILLER = "./weights/hawor/checkpoints/infiller.pt"
 
     def __init__(
-        self,
-        checkpoint: str = DEFAULT_CHECKPOINT,
-        infiller_weight: str = DEFAULT_INFILLER,
-        verbose: bool = False,
-        metric_3D_path: str = 'thirdparty/Metric3D/weights/metric_depth_vit_large_800k.pth',
-        droid_filter_thresh: float = 2.4, # 原HaWoR实现都是使用这个默认值
+            self,
+            checkpoint: str = DEFAULT_CHECKPOINT,
+            infiller_weight: str = DEFAULT_INFILLER,
+            verbose: bool = False,
+            metric_3D_path: str = 'thirdparty/Metric3D/weights/metric_depth_vit_large_800k.pth',
+            droid_filter_thresh: float = 2.4,  # 原HaWoR实现都是使用这个默认值
     ):
-        self.checkpoint      = checkpoint
+        self.checkpoint = checkpoint
         self.infiller_weight = infiller_weight
-        self.verbose         = verbose
+        self.verbose = verbose
         self.model, self.model_cfg = self._load_hawor(self.checkpoint)
         self.hand_detect_model = YOLO('./weights/external/detector.pt')
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -207,9 +205,9 @@ class HaWoRPipeline:
         self.metric = Metric3D(self.metric_3D_path)
         import types
         self.args_droid = types.SimpleNamespace(
-            filter_thresh = droid_filter_thresh,
-            disable_vis = True, # 禁止可视化
-            image_size = None, # 后面每个视频单独动态创建
+            filter_thresh=droid_filter_thresh,
+            disable_vis=True,  # 禁止可视化
+            image_size=None,  # 后面每个视频单独动态创建
         )
         self.filling_model = self._load_infiller_model()
 
@@ -224,7 +222,7 @@ class HaWoRPipeline:
         rot_dim = (num_joints + 1) * 6  # rot6d
         repr_dim = 2 * (pos_dim + shape_dim + rot_dim)
         nhead = 8  # repr_dim = 154
-        self.horizon = 120 # 用于infiller模型的参数
+        self.horizon = 120  # 用于infiller模型的参数
         filling_model = TransformerModel(seq_len=self.horizon, input_dim=repr_dim, d_model=384, nhead=nhead, d_hid=2048,
                                          nlayers=8, dropout=0.05, out_dim=repr_dim, masked_attention_stage=True)
         filling_model.to(self.device)
@@ -232,7 +230,6 @@ class HaWoRPipeline:
         filling_model.eval()
         return filling_model
 
-        
     # # ------------------------------------------------------------------
     # # 内部辅助：把 args namespace 透传给各子模块
     # # ------------------------------------------------------------------
@@ -244,7 +241,6 @@ class HaWoRPipeline:
     #         input_type     = "file",
     #     )
     #     return args
-
 
     def _detect_track(self, images_BGR, thresh=0.5):
 
@@ -300,7 +296,7 @@ class HaWoRPipeline:
         boxes = np.array(boxes, dtype=object)
 
         return boxes, tracks
-    
+
     def _load_hawor(self, checkpoint_path):
         from pathlib import Path
         from hawor.configs import get_config
@@ -311,22 +307,22 @@ class HaWoRPipeline:
         if (model_cfg.MODEL.BACKBONE.TYPE == 'vit') and ('BBOX_SHAPE' not in model_cfg.MODEL):
             model_cfg.defrost()
             assert model_cfg.MODEL.IMAGE_SIZE == 256, f"MODEL.IMAGE_SIZE ({model_cfg.MODEL.IMAGE_SIZE}) should be 256 for ViT backbone"
-            model_cfg.MODEL.BBOX_SHAPE = [192,256]
+            model_cfg.MODEL.BBOX_SHAPE = [192, 256]
             model_cfg.freeze()
 
         model = HAWOR.load_from_checkpoint(checkpoint_path, strict=False, cfg=model_cfg)
         return model, model_cfg
-    
-    def _hawor_motion_estimation(self, images_BGR, image_focal, tracks):
+
+    def _hawor_motion_estimation(self, images_BGR, image_focal, tracks_np):
         """
 
         Returns:
-            frame_chunks_all, model_masks, pred_hand_dict.
-            pred_hand_dict 是原来硬盘写入的json文件，主要分为idx=0,1，区分表示左右手
+            frame_chunks_all, model_masks, pred_hand_json.
+            pred_hand_json 是原来硬盘写入的json文件，主要分为idx=0,1，区分表示左右手
         """
         model = self.model
         model.eval()
-        
+
         # file = video_path
         # video_root = os.path.dirname(file)
         # video = os.path.basename(file).split('.')[0]
@@ -334,7 +330,7 @@ class HaWoRPipeline:
         # imgfiles = np.array(natsorted(glob(f'{img_folder}/*.jpg')))
 
         # tracks = np.load(f'{seq_folder}/tracks_{start_idx}_{end_idx}/model_tracks.npy', allow_pickle=True).item()
-
+        tracks = tracks_np.item()
 
         tid = np.array([tr for tr in tracks])
 
@@ -351,9 +347,9 @@ class HaWoRPipeline:
         for k, idx in enumerate(tid):
             trk = tracks[idx]
 
-            valid = np.array([t['det'] for t in trk])        
+            valid = np.array([t['det'] for t in trk])
             is_right = np.concatenate([t['det_handedness'] for t in trk])[valid]
-            
+
             if is_right.sum() / len(is_right) < 0.5:
                 left_trk.extend(trk)
             else:
@@ -364,40 +360,41 @@ class HaWoRPipeline:
             0: left_trk,
             1: right_trk
         }
-        tid = [0, 1] # 0表示左手， 1表示右手， 区分轨迹的左右手
+        tid = [0, 1]  # 0表示左手， 1表示右手， 区分轨迹的左右手
 
         img = images_BGR[0]
-        img_center = [img.shape[1] / 2, img.shape[0] / 2]# w/2, h/2  
+        img_center = [img.shape[1] / 2, img.shape[0] / 2]  # w/2, h/2
         H, W = img.shape[:2]
         model_masks = np.zeros((len(images_BGR), H, W))
 
         bin_size = 128
         max_faces_per_bin = 20000
         renderer = Renderer(img.shape[1], img.shape[0], image_focal, self.device,
-                        bin_size=bin_size, max_faces_per_bin=max_faces_per_bin)
+                            bin_size=bin_size, max_faces_per_bin=max_faces_per_bin)
         # get faces
         faces = get_mano_faces()
         faces_new = np.array([[92, 38, 234],
-                [234, 38, 239],
-                [38, 122, 239],
-                [239, 122, 279],
-                [122, 118, 279],
-                [279, 118, 215],
-                [118, 117, 215],
-                [215, 117, 214],
-                [117, 119, 214],
-                [214, 119, 121],
-                [119, 120, 121],
-                [121, 120, 78],
-                [120, 108, 78],
-                [78, 108, 79]])
+                              [234, 38, 239],
+                              [38, 122, 239],
+                              [239, 122, 279],
+                              [122, 118, 279],
+                              [279, 118, 215],
+                              [118, 117, 215],
+                              [215, 117, 214],
+                              [117, 119, 214],
+                              [214, 119, 121],
+                              [119, 120, 121],
+                              [121, 120, 78],
+                              [120, 108, 78],
+                              [78, 108, 79]])
         faces_right = np.concatenate([faces, faces_new], axis=0)
-        faces_left = faces_right[:,[0,2,1]]
+        faces_left = faces_right[:, [0, 2, 1]]
 
         frame_chunks_all = defaultdict(list)
-        pred_hand_json = []
+        pred_hand_json = {}
         for idx in tid:
             print(f"tracklet {idx}:")
+            pred_hand_json[idx] = {}
             trk = final_tracks[idx]
 
             # interp bboxes
@@ -408,14 +405,13 @@ class HaWoRPipeline:
             non_zero_indices = np.where(np.any(boxes != 0, axis=1))[0]
             first_non_zero = non_zero_indices[0]
             last_non_zero = non_zero_indices[-1]
-            boxes[first_non_zero:last_non_zero+1] = interpolate_bboxes(boxes[first_non_zero:last_non_zero+1])
-            valid[first_non_zero:last_non_zero+1] = True
+            boxes[first_non_zero:last_non_zero + 1] = interpolate_bboxes(boxes[first_non_zero:last_non_zero + 1])
+            valid[first_non_zero:last_non_zero + 1] = True
 
-
-            boxes = boxes[first_non_zero:last_non_zero+1]
+            boxes = boxes[first_non_zero:last_non_zero + 1]
             is_right = np.concatenate([t['det_handedness'] for t in trk])[valid]
             frame = np.array([t['frame'] for t in trk])[valid]
-            
+
             if is_right.sum() / len(is_right) < 0.5:
                 is_right = np.zeros((len(boxes), 1))
             else:
@@ -428,18 +424,20 @@ class HaWoRPipeline:
                 continue
 
             for frame_ck, boxes_ck in zip(frame_chunks, boxes_chunks):
-                print(f"inference from frame {frame_ck[0]} to {frame_ck[-1]}")
-                img_ck = images_BGR[frame_ck] # BGR格式的！
+                if self.verbose:
+                    print(f"inference from frame {frame_ck[0]} to {frame_ck[-1]}")
+                img_ck = images_BGR[frame_ck]  # BGR格式的！
                 if is_right[0] > 0:
                     do_flip = False
                 else:
                     do_flip = True
-                    
-                results = model.inference(img_ck, boxes_ck, img_focal=image_focal, img_center=img_center, do_flip=do_flip)
+
+                results = model.inference(img_ck, boxes_ck, img_focal=image_focal, img_center=img_center,
+                                          do_flip=do_flip)
 
                 data_out = {
-                    "init_root_orient": results["pred_rotmat"][None, :, 0], # (B, T, 3, 3)
-                    "init_hand_pose": results["pred_rotmat"][None, :, 1:], # (B, T, 15, 3, 3)
+                    "init_root_orient": results["pred_rotmat"][None, :, 0],  # (B, T, 3, 3)
+                    "init_hand_pose": results["pred_rotmat"][None, :, 1:],  # (B, T, 15, 3, 3)
                     "init_trans": results["pred_trans"][None, :, 0],  # (B, T, 3)
                     "init_betas": results["pred_shape"][None, :]  # (B, T, 10)
                 }
@@ -456,25 +454,28 @@ class HaWoRPipeline:
                 data_out["init_hand_pose"] = angle_axis_to_rotation_matrix(init_hand_pose)
 
                 # save camera-space results
-                pred_dict={
-                    k:v.tolist() for k, v in data_out.items()
+                pred_dict = {
+                    k: v.tolist() for k, v in data_out.items()
                 }
-                pred_hand_json[idx] = pred_dict
+                # 3. 使用片段的起始和结束帧作为 Key，避免覆盖
+                chunk_key = f"{frame_ck[0]}_{frame_ck[-1]}"
+                pred_hand_json[idx][chunk_key] = pred_dict
                 # pred_path = os.path.join(seq_folder, 'cam_space', str(idx), f"{frame_ck[0]}_{frame_ck[-1]}.json")
                 # if not os.path.exists(os.path.join(seq_folder, 'cam_space', str(idx))):
                 #     os.makedirs(os.path.join(seq_folder, 'cam_space', str(idx)))
                 # with open(pred_path, "w") as f:
                 #     json.dump(pred_dict, f, indent=1)
 
-
                 # get hand mask
                 data_out["init_root_orient"] = rotation_matrix_to_angle_axis(data_out["init_root_orient"])
                 data_out["init_hand_pose"] = rotation_matrix_to_angle_axis(data_out["init_hand_pose"])
-                if do_flip: # left
-                    outputs = run_mano_left(data_out["init_trans"], data_out["init_root_orient"], data_out["init_hand_pose"], betas=data_out["init_betas"])
-                else: # right
-                    outputs = run_mano(data_out["init_trans"], data_out["init_root_orient"], data_out["init_hand_pose"], betas=data_out["init_betas"])
-                
+                if do_flip:  # left
+                    outputs = run_mano_left(data_out["init_trans"], data_out["init_root_orient"],
+                                            data_out["init_hand_pose"], betas=data_out["init_betas"])
+                else:  # right
+                    outputs = run_mano(data_out["init_trans"], data_out["init_root_orient"], data_out["init_hand_pose"],
+                                       betas=data_out["init_betas"])
+
                 vertices = outputs["vertices"][0].cpu()  # (T, N, 3)
                 for img_i, _ in enumerate(img_ck):
                     if do_flip:
@@ -486,18 +487,19 @@ class HaWoRPipeline:
                     cameras, lights = renderer.create_camera_from_cv(cam_R, cam_T)
                     verts_color = torch.tensor([0, 0, 255, 255]) / 255
                     vertices_i = vertices[[img_i]]
-                    rend, mask = renderer.render_multiple(vertices_i.unsqueeze(0).cuda(), faces, verts_color.unsqueeze(0).cuda(), cameras, lights)
-                    
+                    rend, mask = renderer.render_multiple(vertices_i.unsqueeze(0).cuda(), faces,
+                                                          verts_color.unsqueeze(0).cuda(), cameras, lights)
+
                     model_masks[frame_ck[img_i]] += mask
-                    
-        model_masks = model_masks > 0 # bool
+
+        model_masks = model_masks > 0  # bool
         # np.save(f'{seq_folder}/tracks_{start_idx}_{end_idx}/model_masks.npy', model_masks)
         # joblib.dump(frame_chunks_all, f'{seq_folder}/tracks_{start_idx}_{end_idx}/frame_chunks_all.npy')
         return frame_chunks_all, model_masks, pred_hand_json
 
-    def _extract_frames(self, video_path: str | Path, start_idx:int = 0, end_idx:int = -1, frame_step = 1):
+    def _extract_frames(self, video_path: str | Path, start_idx: int = 0, end_idx: int | None = -1, frame_step=1):
         """
-        从给定视频路径提取视频帧，返回images: list (BGR)
+        从给定视频路径提取视频帧，返回images: numpy.array (BGR)
 
         Args:
             video_path: 输入 mp4 路径
@@ -516,7 +518,7 @@ class HaWoRPipeline:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         except Exception:
             total_frames = 0
-        if not end_idx or end_idx==-1:
+        if not end_idx or end_idx == -1:
             end_idx = total_frames
 
         if self.verbose:
@@ -555,6 +557,7 @@ class HaWoRPipeline:
         if self.verbose:
             print(f"Collected {len(images_BGR)} frames, running batch reconstruction via recon.recon(images)")
 
+        images_BGR = np.stack(images_BGR)  # 这边会进行连续储存，但是会copy操作，从list转过来。可能有时间和内存消耗。
         return images_BGR
 
     def _image_stream(self, images_BGR, calib, stride, max_frame=None):
@@ -591,8 +594,29 @@ class HaWoRPipeline:
 
             yield t, image[None], intrinsics
 
+    @staticmethod
+    def _get_dimension(image):
+        """
+        Get proper image dimension for DROID
+        DROID-SLAM 需要将图像尺寸除以 8，所以输入必须是 8 的倍数。
+        """
+        # if isinstance(imagedir, list):
+        #     imgfiles = imagedir
+        # else:
+        #     imgfiles = sorted(glob(f'{imagedir}/*.jpg'))
+        # image = cv2.imread(imgfiles[0])
+
+        h0, w0, _ = image.shape
+        h1 = int(h0 * np.sqrt((384 * 512) / (h0 * w0)))
+        w1 = int(w0 * np.sqrt((384 * 512) / (h0 * w0)))
+
+        image = cv2.resize(image, (w1, h1))
+        image = image[:h1 - h1 % 8, :w1 - w1 % 8]
+        H, W, _ = image.shape
+        return H, W
+
     def _run_slam(self, images_BGR, masks, calib, depth=None, stride=1,
-                 filter_thresh=2.4, disable_vis=True):
+                  filter_thresh=2.4, disable_vis=True):
         """ Maksed DROID-SLAM """
         depth = None
         droid = None
@@ -601,7 +625,7 @@ class HaWoRPipeline:
         masks = masks[::stride]
 
         """ Resize masks for masked droid """
-        H, W = images_BGR[0].shape[:2]
+        H, W = self._get_dimension(images_BGR[0])
         resize_1 = Resize((H, W), antialias=True)
         resize_2 = Resize((H // 8, W // 8), antialias=True)
 
@@ -616,7 +640,6 @@ class HaWoRPipeline:
             m = resize_2(masks[i:i + 500])
             conf_msks.append(m)
         conf_msks = torch.cat(conf_msks)
-
 
         for (t, image, intrinsics) in tqdm(self._image_stream(images_BGR, calib, stride)):
             if droid is None:
@@ -660,6 +683,7 @@ class HaWoRPipeline:
 
         # Camera calibration (intrinsics) for SLAM
         focal = image_focal
+
         def est_calib(image):
             """
             estimate calibration 估计相机内参
@@ -675,14 +699,14 @@ class HaWoRPipeline:
         calib[:2] = focal
 
         # Droid-slam with masking
-        droid, traj = run_slam(images_BGR, masks=masks, calib=calib)
+        droid, traj = self._run_slam(images_BGR, masks=masks, calib=calib)
         n = droid.video.counter.value
         tstamp = droid.video.tstamp.cpu().int().numpy()[:n]
         disps = droid.video.disps_up.cpu().numpy()[:n]
         if self.verbose:
             print('DBA errors:', droid.backend.errors)
 
-        del droid # 一条视频单独使用一个droid实例！
+        del droid  # 一条视频单独使用一个droid实例！
         torch.cuda.empty_cache()
 
         # Estimate scale
@@ -697,21 +721,7 @@ class HaWoRPipeline:
             print('Predicting Metric Depth ...')
         pred_depths = []
 
-        def get_dimention(image):
-            """
-            Get proper image dimension for DROID
-            DROID-SLAM 需要将图像尺寸除以 8，所以输入必须是 8 的倍数。
-            """
-            h0, w0, _ = image.shape
-            h1 = int(h0 * np.sqrt((384 * 512) / (h0 * w0)))
-            w1 = int(w0 * np.sqrt((384 * 512) / (h0 * w0)))
-
-            image = cv2.resize(image, (w1, h1))
-            image = image[:h1 - h1 % 8, :w1 - w1 % 8]
-            H, W, _ = image.shape
-            return H, W
-
-        H, W = get_dimention(first_img)
+        H, W = self._get_dimension(first_img)
         for t in tqdm(tstamp):
             img = images_BGR[t]
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -799,7 +809,8 @@ class HaWoRPipeline:
                 # pred_path = os.path.join(seq_folder, 'cam_space', str(idx), f"{frame_ck[0]}_{frame_ck[-1]}.json")
                 # with open(pred_path, "r") as f:
                 #     pred_dict = json.load(f)
-                pred_dict = pred_hand_json[idx]
+                chunk_key = f"{frame_ck[0]}_{frame_ck[-1]}"
+                pred_dict = pred_hand_json[idx][chunk_key]
                 data_out = {
                     k: torch.tensor(v) for k, v in pred_dict.items()
                 }
@@ -822,7 +833,7 @@ class HaWoRPipeline:
             missing = ~pred_valid[idx]
 
             frame = frame_list[missing]
-            frame_chunks = parse_chunks_hand_frame(frame) # 这边进行帧分块处理
+            frame_chunks = parse_chunks_hand_frame(frame)  # 这边进行帧分块处理
 
             if self.verbose:
                 print(f"run infiller on {idx2hand[idx]} hand ...")
@@ -831,7 +842,8 @@ class HaWoRPipeline:
                 while frame_ck[0] + start_shift >= 0 and pred_valid[:, frame_ck[0] + start_shift].sum() != 2:
                     start_shift -= 1  # Shift to find the previous valid frame as start
                 if self.verbose:
-                    print(f"run infiller on frame {frame_ck[0] + start_shift} to frame {min(len(images_BGR) - 1, frame_ck[0] + start_shift + filling_length)}")
+                    print(
+                        f"run infiller on frame {frame_ck[0] + start_shift} to frame {min(len(images_BGR) - 1, frame_ck[0] + start_shift + filling_length)}")
 
                 frame_start = frame_ck[0]
                 filling_net_start = max(0, frame_start + start_shift)
@@ -848,7 +860,7 @@ class HaWoRPipeline:
                 src_mask = torch.zeros((filling_length, filling_length), device=self.device).type(torch.bool)
                 src_mask = src_mask.to(self.device)
                 filling_input = torch.from_numpy(filling_input).unsqueeze(0).to(self.device).permute(1, 0,
-                                                                                                2)  # (seq_len, B, in_dim)
+                                                                                                     2)  # (seq_len, B, in_dim)
                 T_original = len(filling_input)
                 filling_length = 120
                 if T_original < filling_length:
@@ -899,14 +911,14 @@ class HaWoRPipeline:
     # 重建主接口
     # ------------------------------------------------------------------
     def reconstruct(
-        self,
-        video_path: str,
-        output_dir: str = "./results",
-        start_idx: int = 0,
-        end_idx: int | None = -1,
-        image_focal: float | None = None,
-        rendering: bool = False,
-        vis_mode: str = "world",
+            self,
+            video_path: str,
+            output_dir: str = "./results",
+            start_idx: int = 0,
+            end_idx: int | None = -1,
+            image_focal: float | None = None,
+            rendering: bool = False,
+            vis_mode: str = "world",
     ) -> dict:
         """
         对单个视频执行完整重建 pipeline。
@@ -948,14 +960,11 @@ class HaWoRPipeline:
 
         ##### Extract Frames #####
         images_BGR = self._extract_frames(video_path, start_idx, end_idx)
-        if not end_idx or end_idx==-1 or end_idx > len(images_BGR):
-            end_idx = len(images_BGR)
 
         ##### Detection + Track #####
         if self.verbose:
             print('Detect and Track ...')
         boxes, tracks = self._detect_track(images_BGR, thresh=0.2)
-
 
         # ── Step 2: HaWoR 运动估计 ──────────────────────────────────────
         if self.verbose:
@@ -971,6 +980,7 @@ class HaWoRPipeline:
         if self.verbose:
             print("[HaWoR] Step 3/4 — SLAM")
         pred_cam = self._hawor_slam(images_BGR, model_masks, image_focal)
+
         def _load_slam_cam(pred_cam):
             pred_traj = pred_cam['traj']
             t_c2w_sla = torch.tensor(pred_traj[:, :3]) * pred_cam['scale']
@@ -997,7 +1007,7 @@ class HaWoRPipeline:
         # ── 构建双手网格字典 ─────────────────────────────────────────────
         faces_right, faces_left = _build_faces()
         vis_start = 0
-        vis_end   = pred_trans.shape[1] - 1
+        vis_end = pred_trans.shape[1] - 1
 
         right_dict, left_dict = _build_hand_dicts(
             pred_trans, pred_rot, pred_hand_pose, pred_betas,
@@ -1013,31 +1023,65 @@ class HaWoRPipeline:
 
         # ── 整理返回结果 ─────────────────────────────────────────────────
         result = dict(
-            pred_trans     = pred_trans,
-            pred_rot       = pred_rot,
-            pred_hand_pose = pred_hand_pose,
-            pred_betas     = pred_betas,
-            pred_valid     = pred_valid,
-            right_dict     = right_dict,
-            left_dict      = left_dict,
-            R_c2w          = R_c2w_sla_all,
-            t_c2w          = t_c2w_sla_all,
-            R_w2c          = R_w2c_sla_all,
-            t_w2c          = t_w2c_sla_all,
-            img_focal      = image_focal,
-            rendered_video = None,
+            pred_trans=pred_trans,
+            pred_rot=pred_rot,
+            pred_hand_pose=pred_hand_pose,
+            pred_betas=pred_betas,
+            pred_valid=pred_valid,
+            right_dict=right_dict,
+            left_dict=left_dict,
+            R_c2w=R_c2w_sla_all,
+            t_c2w=t_c2w_sla_all,
+            R_w2c=R_w2c_sla_all,
+            t_w2c=t_w2c_sla_all,
+            img_focal=image_focal,
+            rendered_video=None,
+            seq_folder=None
         )
 
         # ── 可选：渲染 mp4 ───────────────────────────────────────────────
         if rendering:
+            # collect image files 仅用于接口的统一。渲染接口需要把每一帧拆成images，太多处了，不想改了。为了接口统一，暂时生成images
+            file = video_path
+            root = os.path.dirname(file)
+            seq = os.path.basename(file).split('.')[0]
+
+            seq_folder = f'{root}/{seq}'
+            img_folder = f'{seq_folder}/extracted_images'
+            os.makedirs(seq_folder, exist_ok=True)
+            os.makedirs(img_folder, exist_ok=True)
+            print(f'Running detect_track on {file} ...')
+
+            ##### Extract Frames #####
+            def extract_frames(video_path, output_folder):
+                if not os.path.exists(output_folder):
+                    os.makedirs(output_folder)
+
+                command = [
+                    'ffmpeg',
+                    '-i', video_path,
+                    '-vf', 'fps=30',
+                    '-start_number', '0',
+                    os.path.join(output_folder, '%04d.jpg')
+                ]
+
+                subprocess.run(command, check=True)
+            imgfiles = natsorted(glob(f'{img_folder}/*.jpg'))
+            if len(imgfiles) > 0:
+                print("Skip extracting frames")
+            else:
+                _ = extract_frames(file, img_folder)
+            imgfiles = natsorted(glob(f'{img_folder}/*.jpg'))
             rendered_video = self._render(
-                result      = result,
-                vis_start   = vis_start,
-                vis_end     = vis_end,
-                output_dir  = output_dir,
-                vis_mode    = vis_mode,
-                video_path  = video_path,
+                result=result,
+                imgfiles=imgfiles,
+                vis_start=vis_start,
+                vis_end=vis_end,
+                output_dir=output_dir,
+                vis_mode=vis_mode,
+                video_path=video_path,
             )
+            result["seq_folder"]=seq_folder
             result["rendered_video"] = rendered_video
             if rendered_video:
                 print(f"[HaWoR] Rendered video saved to: {rendered_video}")
@@ -1048,13 +1092,14 @@ class HaWoRPipeline:
     # 渲染（可选）
     # ------------------------------------------------------------------
     def _render(
-        self,
-        result: dict,
-        vis_start: int,
-        vis_end: int,
-        output_dir: str,
-        vis_mode: str,
-        video_path: str = "",
+            self,
+            result: dict,
+            imgfiles: list,
+            vis_start: int,
+            vis_end: int,
+            output_dir: str,
+            vis_mode: str,
+            video_path: str = "",
     ) -> str | None:
         """
         调用公共渲染函数 render_hand_results，返回生成的 mp4 路径（失败则返回 None）。
@@ -1062,23 +1107,23 @@ class HaWoRPipeline:
         from lib.vis.run_vis2 import render_hand_results
 
         video_stem = os.path.splitext(os.path.basename(video_path))[0] if video_path else "output"
-        image_names = list(result["imgfiles"][vis_start:vis_end])
+        image_names = list(imgfiles[vis_start:vis_end])
 
         print(f"[HaWoR] Rendering frames {vis_start} → {vis_end}  (mode={vis_mode})")
 
         return render_hand_results(
-            left_dict    = result["left_dict"],
-            right_dict   = result["right_dict"],
-            image_names  = image_names,
-            img_focal    = result["img_focal"],
-            output_dir   = output_dir,
-            vis_start    = vis_start,
-            vis_end      = vis_end,
-            vis_mode     = vis_mode,
-            R_c2w        = result["R_c2w"],
-            t_c2w        = result["t_c2w"],
-            R_w2c        = result["R_w2c"],
-            t_w2c        = result["t_w2c"],
-            video_stem   = video_stem,
+            left_dict=result["left_dict"],
+            right_dict=result["right_dict"],
+            image_names=image_names,
+            img_focal=result["img_focal"],
+            output_dir=output_dir,
+            vis_start=vis_start,
+            vis_end=vis_end,
+            vis_mode=vis_mode,
+            R_c2w=result["R_c2w"],
+            t_c2w=result["t_c2w"],
+            R_w2c=result["R_w2c"],
+            t_w2c=result["t_w2c"],
+            video_stem=video_stem,
         )
 

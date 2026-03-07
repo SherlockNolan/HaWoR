@@ -17,7 +17,7 @@ reconstruct.py
 export MGLW_WINDOW=moderngl_window.context.headless.Window
 export PYOPENGL_PLATFORM=egl
 xvfb-run -a python reconstruct.py --video_path example/factory001_worker001_00000.mp4 --output_dir ./results --rendering --vis_mode cam
-
+xvfb-run -a python reconstruct.py --video_path example/video_0.mp4 --output_dir ./results --rendering --vis_mode cam
 
 """
 import argparse
@@ -73,7 +73,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Infiller 模型权重路径",
     )
     parser.add_argument(
-        "--img_focal", type=float, default=None,
+        "--image_focal", type=float, default=None,
         help="相机焦距（像素），不提供则自动估计",
     )
     parser.add_argument(
@@ -95,7 +95,7 @@ def main():
     reconstructor = HaWoRPipeline(
         checkpoint      = args.checkpoint,
         infiller_weight = args.infiller_weight,
-        img_focal       = args.img_focal,
+        verbose         = True,
     )
 
     result = reconstructor.reconstruct(
@@ -103,6 +103,7 @@ def main():
         output_dir = args.output_dir,
         rendering  = args.rendering,
         vis_mode   = args.vis_mode,
+        image_focal= args.image_focal
     )
 
     print("\n=== Reconstruction complete ===")
