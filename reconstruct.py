@@ -41,7 +41,7 @@ from scripts.scripts_test_video.hawor_video import hawor_infiller_plain, hawor_m
 from scripts.scripts_test_video.hawor_slam import hawor_slam
 from hawor.utils.process import get_mano_faces, run_mano, run_mano_left
 from lib.eval_utils.custom_utils import load_slam_cam
-from lib.pipeline.HaWoRPipeline import HaWoRPipeline
+from lib.pipeline.HaWoRPipeline import HaWoRPipeline, HaWoRConfig
 
 
 
@@ -64,12 +64,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--checkpoint", type=str,
-        default=HaWoRPipeline.DEFAULT_CHECKPOINT,
+        default="./weights/hawor/checkpoints/hawor.ckpt",
         help="HaWoR 模型权重路径",
     )
     parser.add_argument(
         "--infiller_weight", type=str,
-        default=HaWoRPipeline.DEFAULT_INFILLER,
+        default="./weights/hawor/checkpoints/infiller.pt",
         help="Infiller 模型权重路径",
     )
     parser.add_argument(
@@ -91,12 +91,14 @@ def _build_parser() -> argparse.ArgumentParser:
 def main():
     parser = _build_parser()
     args = parser.parse_args()
-
-    reconstructor = HaWoRPipeline(
+    
+    haworConfig = HaWoRConfig(
         checkpoint      = args.checkpoint,
         infiller_weight = args.infiller_weight,
         verbose         = True,
     )
+
+    reconstructor = HaWoRPipeline(haworConfig)
 
     result = reconstructor.reconstruct(
         video_path = args.video_path,
@@ -107,7 +109,7 @@ def main():
     )
 
     print("\n=== Reconstruction complete ===")
-    print(f"  seq_folder    : {result['seq_folder']}")
+    print(f"  seq_folder    : {result['seq_folder']}") # 用于rendering的时候extract_frames的临时图片生成目录
     print(f"  img_focal     : {result['img_focal']}")
     print(f"  pred_trans    : {result['pred_trans'].shape}")
     print(f"  pred_rot      : {result['pred_rot'].shape}")

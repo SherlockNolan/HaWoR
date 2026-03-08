@@ -2,6 +2,7 @@ import math
 import os
 import sys
 from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 import sys
 
@@ -60,6 +61,9 @@ from hawor.utils.rotation import angle_axis_to_rotation_matrix, rotation_matrix_
 from hawor.utils.process import block_print, enable_print
 from infiller.lib.model.network import TransformerModel
 from thirdparty.Metric3D.metric import Metric3D
+from scipy.spatial.transform import Rotation as ScipyRotation
+from scipy.spatial.transform import Slerp
+from scipy.interpolate import CubicSpline
 
 # ---------------------------------------------------------------------------
 # 面片常量（与 demo.py 保持一致）
@@ -165,6 +169,360 @@ def _apply_coord_transform(right_dict, left_dict,
 
 
 # ---------------------------------------------------------------------------
+# 抖动检测与平滑（Jitter Detection & Smoothing）
+# ---------------------------------------------------------------------------
+
+def _mad_detect_jitter(signal: np.ndarray, window: int = 5, thresh_k: float = 3.5) -> np.ndarray:
+    """
+    用滑动窗口 MAD（中位数绝对偏差）检测抖动帧。
+
+    原理
+    ----
+    对信号的逐帧速度（一阶差分的 L2 范数）计算全局 MAD 统计量：
+        MAD = median(|v_i - median(v)|)
+    若某帧速度满足 |v_i - median(v)| > thresh_k * MAD / 0.6745 则视为抖动。
+    0.6745 使 MAD 成为高斯分布标准差的一致估计量。
+
+    Parameters
+    ----------
+    signal : np.ndarray, shape (T, D)
+        待检测的时序信号（D 维，T 帧）。
+    window : int
+        局部平滑窗口大小（用于预去噪，奇数）。
+    thresh_k : float
+        MAD 倍数阈值，越小越敏感；建议 3.0 ~ 5.0。
+
+    Returns
+    -------
+    jitter_mask : np.ndarray, shape (T,), dtype=bool
+        True 表示该帧被判定为抖动帧（需要被修复）。
+    """
+    T = signal.shape[0]
+    if T < 3:
+        return np.zeros(T, dtype=bool)
+
+    # 一阶差分速度（帧间变化幅度）
+    vel = np.linalg.norm(np.diff(signal, axis=0), axis=-1)   # (T-1,)
+
+    # 全局 MAD 统计
+    median_v = np.median(vel)
+    mad = np.median(np.abs(vel - median_v))
+    sigma_hat = mad / 0.6745 + 1e-8   # 鲁棒标准差估计
+
+    # 离群判定
+    outlier = np.abs(vel - median_v) > thresh_k * sigma_hat  # (T-1,)
+
+    # 若第 t 帧的离开速度或到达速度均为离群 → 该帧本身是抖动帧
+    jitter_mask = np.zeros(T, dtype=bool)
+    # vel[t-1] 是帧 t-1→t 的速度，vel[t] 是帧 t→t+1 的速度
+    for t in range(1, T - 1):
+        if outlier[t - 1] and outlier[t]:   # 到达和离开都异常 → 孤立跳变帧
+            jitter_mask[t] = True
+    # 边界：第 0 帧或最后一帧若速度异常，也标记
+    if T >= 2 and outlier[0]:
+        jitter_mask[0] = True
+    if T >= 2 and outlier[-1]:
+        jitter_mask[-1] = True
+
+    return jitter_mask
+
+
+def _interp_translation(trans: np.ndarray, jitter_mask: np.ndarray) -> np.ndarray:
+    """
+    对平移量中的抖动帧用三次样条插值修复。
+
+    Parameters
+    ----------
+    trans : np.ndarray, shape (T, 3)
+    jitter_mask : np.ndarray, shape (T,), bool
+
+    Returns
+    -------
+    trans_fixed : np.ndarray, shape (T, 3)
+    """
+    T = trans.shape[0]
+    t_all = np.arange(T)
+    good = ~jitter_mask
+
+    if good.sum() < 2:
+        return trans.copy()
+
+    trans_fixed = trans.copy()
+    t_good = t_all[good]
+    v_good = trans[good]   # (N_good, 3)
+
+    if good.sum() >= 4:
+        cs = CubicSpline(t_good, v_good, extrapolate=True)
+    else:
+        # 点太少，退化为线性插值
+        from scipy.interpolate import interp1d
+        cs = interp1d(t_good, v_good, axis=0, kind='linear', fill_value='extrapolate')
+
+    bad_t = t_all[jitter_mask]
+    if len(bad_t) > 0:
+        trans_fixed[bad_t] = cs(bad_t)
+
+    return trans_fixed
+
+
+def _interp_rotation_aa(rot_aa: np.ndarray, jitter_mask: np.ndarray) -> np.ndarray:
+    """
+    对轴角旋转中的抖动帧用 SLERP 修复。
+
+    Parameters
+    ----------
+    rot_aa : np.ndarray, shape (T, 3)  轴角表示
+    jitter_mask : np.ndarray, shape (T,), bool
+
+    Returns
+    -------
+    rot_fixed : np.ndarray, shape (T, 3)
+    """
+    T = rot_aa.shape[0]
+    t_all = np.arange(T, dtype=float)
+    good = ~jitter_mask
+
+    if good.sum() < 2:
+        return rot_aa.copy()
+
+    rot_fixed = rot_aa.copy()
+    t_good = t_all[good]
+    rots_good = ScipyRotation.from_rotvec(rot_aa[good])
+    slerp_fn = Slerp(t_good, rots_good)
+
+    bad_t = t_all[jitter_mask]
+    if len(bad_t) > 0:
+        # 超出已知帧范围的 bad_t 需要 clamp，避免外推失败
+        bad_t_clamped = np.clip(bad_t, t_good[0], t_good[-1])
+        rot_fixed[jitter_mask] = slerp_fn(bad_t_clamped).as_rotvec()
+
+    return rot_fixed
+
+
+def _gaussian_smooth_1d(signal: np.ndarray, sigma: float = 1.5) -> np.ndarray:
+    """
+    对时序信号每一维施加高斯核平滑（边界用镜像填充）。
+
+    Parameters
+    ----------
+    signal : np.ndarray, shape (T, D)
+    sigma  : float  高斯核标准差（帧数单位），越大越平滑
+
+    Returns
+    -------
+    smoothed : np.ndarray, shape (T, D)
+    """
+    from scipy.ndimage import gaussian_filter1d
+    return gaussian_filter1d(signal, sigma=sigma, axis=0, mode='mirror')
+
+
+def smooth_hand_predictions(
+    pred_trans: torch.Tensor,
+    pred_rot: torch.Tensor,
+    pred_hand_pose: torch.Tensor,
+    pred_valid: np.ndarray,
+    *,
+    jitter_thresh_k: float = 3.5,
+    smooth_sigma_trans: float = 1.2,
+    smooth_sigma_rot: float = 0.8,
+    smooth_sigma_pose: float = 0.6,
+    verbose: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    对 HaWoR 输出的双手平移 / 根旋转 / 手指姿态做抖动检测与平滑。
+
+    流程
+    ----
+    1. **MAD 抖动检测**：在有效帧范围内，基于帧间速度的 MAD 统计量识别跳变帧。
+    2. **插值修复**：平移用三次样条插值，旋转用 SLERP，替换掉跳变帧的原始值。
+    3. **高斯平滑**：对平移、根旋转、手指姿态分别施加各自 sigma 的高斯核平滑，
+       消除高频颤抖。
+
+    Parameters
+    ----------
+    pred_trans     : Tensor (2, T, 3)   平移（世界坐标）
+    pred_rot       : Tensor (2, T, 3)   根方向（轴角）
+    pred_hand_pose : Tensor (2, T, 45)  手指姿态（轴角展开）
+    pred_valid     : np.ndarray (2, T)  有效帧掩码（bool）
+    jitter_thresh_k : float  MAD 检测阈值倍数（越小越敏感，建议 3~5）
+    smooth_sigma_trans : float  平移高斯平滑 sigma（帧数单位）
+    smooth_sigma_rot   : float  根旋转高斯平滑 sigma
+    smooth_sigma_pose  : float  手指姿态高斯平滑 sigma
+    verbose : bool
+
+    Returns
+    -------
+    pred_trans_s, pred_rot_s, pred_hand_pose_s : 同形状平滑后的 Tensor
+    """
+    n_hands, T, _ = pred_trans.shape
+    trans_np    = pred_trans.numpy().copy()       # (2, T, 3)
+    rot_np      = pred_rot.numpy().copy()         # (2, T, 3)
+    pose_np     = pred_hand_pose.numpy().copy()   # (2, T, 45)
+
+    hand_names = ['left', 'right']
+
+    for h in range(n_hands):
+        valid_mask = pred_valid[h].astype(bool)   # (T,)
+        valid_idx  = np.where(valid_mask)[0]
+
+        if len(valid_idx) < 4:
+            if verbose:
+                print(f"[Smooth] {hand_names[h]} hand: too few valid frames ({len(valid_idx)}), skip.")
+            continue
+
+        # ── 1. MAD 抖动检测（仅在有效帧上做） ────────────────────────
+        trans_valid  = trans_np[h][valid_idx]   # (N_valid, 3)
+        rot_valid    = rot_np[h][valid_idx]     # (N_valid, 3)
+
+        jitter_trans = _mad_detect_jitter(trans_valid, thresh_k=jitter_thresh_k)
+        jitter_rot   = _mad_detect_jitter(rot_valid,   thresh_k=jitter_thresh_k)
+        jitter_union = jitter_trans | jitter_rot        # 任一跳变则修复
+
+        n_jitter = jitter_union.sum()
+        if verbose:
+            print(f"[Smooth] {hand_names[h]} hand: detected {n_jitter}/{len(valid_idx)} jitter frames "
+                  f"(thresh_k={jitter_thresh_k})")
+
+        # ── 2. 插值修复跳变帧 ────────────────────────────────────────
+        if n_jitter > 0:
+            trans_fixed = _interp_translation(trans_valid, jitter_union)
+            rot_fixed   = _interp_rotation_aa(rot_valid,   jitter_union)
+            trans_np[h][valid_idx] = trans_fixed
+            rot_np[h][valid_idx]   = rot_fixed
+
+            # 手指姿态：每 3 维为一个关节的轴角，逐关节 SLERP 修复
+            for j in range(15):
+                pose_j = pose_np[h][valid_idx, j * 3:(j + 1) * 3]   # (N_valid, 3)
+                pose_np[h][valid_idx, j * 3:(j + 1) * 3] = _interp_rotation_aa(pose_j, jitter_union)
+
+        # ── 3. 高斯平滑（对有效帧段整体平滑） ───────────────────────
+        # 平移
+        trans_np[h][valid_idx] = _gaussian_smooth_1d(
+            trans_np[h][valid_idx], sigma=smooth_sigma_trans
+        )
+        # 根旋转（在向量空间近似平滑，适合小角度旋转）
+        rot_np[h][valid_idx] = _gaussian_smooth_1d(
+            rot_np[h][valid_idx], sigma=smooth_sigma_rot
+        )
+        # 手指姿态
+        pose_np[h][valid_idx] = _gaussian_smooth_1d(
+            pose_np[h][valid_idx], sigma=smooth_sigma_pose
+        )
+
+    pred_trans_s    = torch.from_numpy(trans_np)
+    pred_rot_s      = torch.from_numpy(rot_np)
+    pred_hand_pose_s = torch.from_numpy(pose_np)
+
+    return pred_trans_s, pred_rot_s, pred_hand_pose_s
+
+
+def smooth_camera_trajectory(
+    R_c2w: torch.Tensor,
+    t_c2w: torch.Tensor,
+    *,
+    jitter_thresh_k: float = 4.0,
+    smooth_sigma: float = 1.0,
+    verbose: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    对 SLAM 估计的相机轨迹做抖动检测与平滑。
+
+    Parameters
+    ----------
+    R_c2w : Tensor (T, 3, 3)  相机→世界旋转
+    t_c2w : Tensor (T, 3)     相机→世界平移
+    jitter_thresh_k : float   MAD 阈值倍数
+    smooth_sigma : float      高斯平滑 sigma
+    verbose : bool
+
+    Returns
+    -------
+    R_c2w_s, t_c2w_s : 平滑后的旋转与平移
+    """
+    T = t_c2w.shape[0]
+    t_np = t_c2w.numpy().copy()   # (T, 3)
+
+    # 平移抖动检测+插值
+    jitter_t = _mad_detect_jitter(t_np, thresh_k=jitter_thresh_k)
+    n_jitter = jitter_t.sum()
+    if verbose:
+        print(f"[Smooth] Camera trajectory: detected {n_jitter}/{T} jitter frames")
+
+    if n_jitter > 0:
+        t_np = _interp_translation(t_np, jitter_t)
+
+    # 平移高斯平滑
+    t_np = _gaussian_smooth_1d(t_np, sigma=smooth_sigma)
+
+    # 旋转：转为四元数 → SLERP 插值 → 高斯平滑轴角
+    R_np   = R_c2w.numpy()                                          # (T, 3, 3)
+    rot_aa = ScipyRotation.from_matrix(R_np).as_rotvec()           # (T, 3)
+
+    if n_jitter > 0:
+        rot_aa = _interp_rotation_aa(rot_aa, jitter_t)
+
+    rot_aa = _gaussian_smooth_1d(rot_aa, sigma=smooth_sigma)
+    R_np_s = ScipyRotation.from_rotvec(rot_aa).as_matrix()         # (T, 3, 3)
+
+    R_c2w_s = torch.from_numpy(R_np_s).float()
+    t_c2w_s = torch.from_numpy(t_np).float()
+
+    return R_c2w_s, t_c2w_s
+
+
+# ---------------------------------------------------------------------------
+# 配置 dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HaWoRConfig:
+    """
+    HaWoRPipeline 的统一配置类。
+
+    字段分组
+    --------
+    路径配置
+        checkpoint        : HaWoR 模型权重路径。
+        infiller_weight   : Infiller 模型权重路径。
+        metric_3D_path    : Metric3D 权重路径。
+        detector_path     : 手部检测器（YOLO）权重路径。
+
+    运行配置
+        verbose           : 是否打印详细日志。
+        droid_filter_thresh : DROID-SLAM 的 filter_thresh 参数。
+
+    抖动平滑配置
+        smooth_hands      : 是否对手部预测结果做抖动平滑。
+        smooth_camera     : 是否对相机轨迹做抖动平滑。
+        jitter_thresh_k_hands : 手部 MAD 抖动检测阈值倍数（越小越敏感，建议 3~5）。
+        jitter_thresh_k_cam   : 相机 MAD 抖动检测阈值倍数。
+        smooth_sigma_trans    : 手部平移高斯平滑 sigma（帧数单位）。
+        smooth_sigma_rot      : 手部根旋转高斯平滑 sigma。
+        smooth_sigma_pose     : 手指姿态高斯平滑 sigma。
+        smooth_sigma_cam      : 相机轨迹高斯平滑 sigma。
+    """
+    # ── 路径配置 ─────────────────────────────────────────────────────
+    checkpoint: str = "./weights/hawor/checkpoints/hawor.ckpt"
+    infiller_weight: str = "./weights/hawor/checkpoints/infiller.pt"
+    metric_3D_path: str = "thirdparty/Metric3D/weights/metric_depth_vit_large_800k.pth"
+    detector_path: str = "./weights/external/detector.pt"
+
+    # ── 运行配置 ─────────────────────────────────────────────────────
+    verbose: bool = False
+    droid_filter_thresh: float = 2.4   # 原 HaWoR 实现的默认值
+
+    # ── 抖动平滑配置 ─────────────────────────────────────────────────
+    smooth_hands: bool = True
+    smooth_camera: bool = True
+    jitter_thresh_k_hands: float = 3.5
+    jitter_thresh_k_cam: float = 4.0
+    smooth_sigma_trans: float = 1.2
+    smooth_sigma_rot: float = 0.8
+    smooth_sigma_pose: float = 0.6
+    smooth_sigma_cam: float = 1.0
+
+
+# ---------------------------------------------------------------------------
 # 核心类
 # ---------------------------------------------------------------------------
 
@@ -172,44 +530,65 @@ class HaWoRPipeline:
     """
     HaWoR 重建 pipeline 的核心类。
 
-    参数
-    ----
-    checkpoint : str
-        HaWoR 模型权重路径。
-    infiller_weight : str
-        Infiller 模型权重路径。
-    img_focal : float | None
-        相机焦距，若为 None 则自动估计。
+    推荐用法
+    --------
+    >>> cfg = HaWoRConfig(verbose=True, smooth_hands=True)
+    >>> pipeline = HaWoRPipeline(cfg)
+    >>> result = pipeline.reconstruct("input.mp4")
+
+    也可以直接用关键字参数（内部会自动构造 HaWoRConfig）：
+    >>> pipeline = HaWoRPipeline.from_kwargs(verbose=True, smooth_hands=False)
     """
 
-    DEFAULT_CHECKPOINT = "./weights/hawor/checkpoints/hawor.ckpt"
-    DEFAULT_INFILLER = "./weights/hawor/checkpoints/infiller.pt"
+    def __init__(self, cfg: HaWoRConfig | None = None):
+        if cfg is None:
+            cfg = HaWoRConfig()
+        self.cfg = cfg
 
-    def __init__(
-            self,
-            checkpoint: str = DEFAULT_CHECKPOINT,
-            infiller_weight: str = DEFAULT_INFILLER,
-            verbose: bool = False,
-            metric_3D_path: str = 'thirdparty/Metric3D/weights/metric_depth_vit_large_800k.pth',
-            droid_filter_thresh: float = 2.4,  # 原HaWoR实现都是使用这个默认值
-    ):
-        self.checkpoint = checkpoint
-        self.infiller_weight = infiller_weight
-        self.verbose = verbose
+        # ── 路径 & 运行配置 ────────────────────────────────────────────
+        self.checkpoint = cfg.checkpoint
+        self.infiller_weight = cfg.infiller_weight
+        self.verbose = cfg.verbose
+
+        # ── 加载模型 ───────────────────────────────────────────────────
         self.model, self.model_cfg = self._load_hawor(self.checkpoint)
-        self.hand_detect_model = YOLO('./weights/external/detector.pt')
+        self.hand_detect_model = YOLO(cfg.detector_path)
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         print(f"[INIT] HaWoRPipeline Using device: {self.device}")
         self.model = self.model.to(self.device)
-        self.metric_3D_path = metric_3D_path
-        self.metric = Metric3D(self.metric_3D_path)
+        self.metric = Metric3D(cfg.metric_3D_path)
+
+        # ── DROID-SLAM 参数 ────────────────────────────────────────────
         import types
         self.args_droid = types.SimpleNamespace(
-            filter_thresh=droid_filter_thresh,
-            disable_vis=True,  # 禁止可视化
-            image_size=None,  # 后面每个视频单独动态创建
+            filter_thresh=cfg.droid_filter_thresh,
+            disable_vis=True,   # 禁止可视化
+            image_size=None,    # 每个视频单独动态创建
         )
+
+        # ── 抖动平滑配置（直接引用 cfg，便于运行时修改） ───────────────
+        self.smooth_hands = cfg.smooth_hands
+        self.smooth_camera = cfg.smooth_camera
+        self.jitter_thresh_k_hands = cfg.jitter_thresh_k_hands
+        self.jitter_thresh_k_cam = cfg.jitter_thresh_k_cam
+        self.smooth_sigma_trans = cfg.smooth_sigma_trans
+        self.smooth_sigma_rot = cfg.smooth_sigma_rot
+        self.smooth_sigma_pose = cfg.smooth_sigma_pose
+        self.smooth_sigma_cam = cfg.smooth_sigma_cam
+
+        # ── Infiller 模型 ──────────────────────────────────────────────
         self.filling_model = self._load_infiller_model()
+
+    @classmethod
+    def from_kwargs(cls, **kwargs) -> "HaWoRPipeline":
+        """
+        便捷工厂方法，允许用关键字参数直接构造，无需手动创建 HaWoRConfig。
+
+        示例
+        ----
+        >>> pipeline = HaWoRPipeline.from_kwargs(verbose=True, smooth_hands=False)
+        """
+        return cls(HaWoRConfig(**kwargs))
 
     def _load_infiller_model(self):
         if self.verbose:
@@ -1004,6 +1383,31 @@ class HaWoRPipeline:
         # pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = \
         #     hawor_infiller_plain(args, start_idx, end_idx, frame_chunks_all)
 
+        # ── Step 5: 抖动检测与平滑 ────────────────────────────────────────
+        if self.smooth_hands:
+            if self.verbose:
+                print("[HaWoR] Step 5a — Smoothing hand predictions (MAD jitter detection + Gaussian)")
+            pred_trans, pred_rot, pred_hand_pose = smooth_hand_predictions(
+                pred_trans, pred_rot, pred_hand_pose, pred_valid,
+                jitter_thresh_k=self.jitter_thresh_k_hands,
+                smooth_sigma_trans=self.smooth_sigma_trans,
+                smooth_sigma_rot=self.smooth_sigma_rot,
+                smooth_sigma_pose=self.smooth_sigma_pose,
+                verbose=self.verbose,
+            )
+
+        if self.smooth_camera:
+            if self.verbose:
+                print("[HaWoR] Step 5b — Smoothing camera trajectory (MAD jitter detection + Gaussian)")
+            R_c2w_sla_all, t_c2w_sla_all = smooth_camera_trajectory(
+                R_c2w_sla_all, t_c2w_sla_all,
+                jitter_thresh_k=self.jitter_thresh_k_cam,
+                smooth_sigma=self.smooth_sigma_cam,
+                verbose=self.verbose,
+            )
+            R_w2c_sla_all = R_c2w_sla_all.transpose(-1, -2)
+            t_w2c_sla_all = -torch.einsum("bij,bj->bi", R_w2c_sla_all, t_c2w_sla_all)
+
         # ── 构建双手网格字典 ─────────────────────────────────────────────
         faces_right, faces_left = _build_faces()
         vis_start = 0
@@ -1041,6 +1445,8 @@ class HaWoRPipeline:
 
         # ── 可选：渲染 mp4 ───────────────────────────────────────────────
         if rendering:
+            if self.verbose:
+                print("[WARNING] You are trying to render the video which calls the original old API and it will generate temp frame images to seq_folder which degrades the performance. It's recommended to use rendering in testing single video only.")
             # collect image files 仅用于接口的统一。渲染接口需要把每一帧拆成images，太多处了，不想改了。为了接口统一，暂时生成images
             file = video_path
             root = os.path.dirname(file)
