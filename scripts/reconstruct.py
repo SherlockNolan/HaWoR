@@ -85,6 +85,10 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["world", "cam"],
         help="渲染视角：world（世界坐标）或 cam（相机坐标）",
     )
+    parser.add_argument(
+        "--progress-bar", action="store_true",
+        help="显示重建各阶段的总体进度条（平均分配到 4 或 5 个阶段）",
+    )
     return parser
 
 
@@ -110,7 +114,8 @@ def main():
         output_dir = args.output_dir,
         rendering  = args.rendering,
         vis_mode   = args.vis_mode,
-        image_focal= args.image_focal
+        image_focal= args.image_focal,
+        use_progress_bar = args.progress_bar,
     )
     
     end_time = time.perf_counter()

@@ -578,6 +578,9 @@ class HaWoRPipeline:
 
         # ── Infiller 模型 ──────────────────────────────────────────────
         self.filling_model = self._load_infiller_model()
+        
+        # ── 进度 ──────────────────────────────────────────────
+        self.progress_percentage = 0.0 # 0-1的实数表示总处理进度
 
     @classmethod
     def from_kwargs(cls, **kwargs) -> "HaWoRPipeline":
@@ -1298,7 +1301,8 @@ class HaWoRPipeline:
             image_focal: float | None = None,
             rendering: bool = False,
             vis_mode: str = "world",
-    ) -> dict:
+            use_progress_bar: bool = False,
+        ) -> dict:
         """
         对单个视频执行完整重建 pipeline。
 
@@ -1306,7 +1310,7 @@ class HaWoRPipeline:
             video_path : str
                 输入视频路径。
             output_dir : str | None
-                输出目录。若为 None，则默认保存在与视频同名的子目录中。
+                渲染视频的输出目录。若为 None，则默认保存在与视频同名的子目录中。只有rendering开启的时候有效
             rendering : bool
                 是否渲染并合成 mp4 视频。
             vis_mode : str
@@ -1329,6 +1333,14 @@ class HaWoRPipeline:
                 - 'rendered_video': str | None        — 渲染视频路径（仅 rendering=True 时有值）
         """
 
+        # Setup overall progress bar across stages (4 or 5)
+        smoothing_enabled = bool(self.smooth_hands or self.smooth_camera)
+        num_stages = 4 + (1 if smoothing_enabled else 0)
+        self.progress_percentage = 0.0
+        overall_pb = None
+        if use_progress_bar:
+            overall_pb = tqdm(total=num_stages, desc="Overall Progress", unit="stage")
+
         # ── Step 1: 检测 & 追踪 ─────────────────────────────────────────
         if self.verbose:
             print("[HaWoR] Step 1/4 — Detect & Track")
@@ -1344,6 +1356,9 @@ class HaWoRPipeline:
         if self.verbose:
             print('Detect and Track ...')
         boxes, tracks = self._detect_track(images_BGR, thresh=0.2)
+        if overall_pb is not None:
+            self.progress_percentage += 1/num_stages
+            overall_pb.update(1)
 
         # ── Step 2: HaWoR 运动估计 ──────────────────────────────────────
         if self.verbose:
@@ -1354,11 +1369,17 @@ class HaWoRPipeline:
         frame_chunks_all, model_masks, pred_hand_json = self._hawor_motion_estimation(
             images_BGR, image_focal, tracks
         )
+        if overall_pb is not None:
+            self.progress_percentage += 1/num_stages
+            overall_pb.update(1)
 
         # ── Step 3: SLAM ─────────────────────────────────────────────────
         if self.verbose:
             print("[HaWoR] Step 3/4 — SLAM")
         pred_cam = self._hawor_slam(images_BGR, model_masks, image_focal)
+        if overall_pb is not None:
+            self.progress_percentage += 1/num_stages
+            overall_pb.update(1)
 
         def _load_slam_cam(pred_cam):
             pred_traj = pred_cam['traj']
@@ -1382,6 +1403,10 @@ class HaWoRPipeline:
             self._hawor_infiller(images_BGR, frame_chunks_all, slam_cam, pred_hand_json)
         # pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = \
         #     hawor_infiller_plain(args, start_idx, end_idx, frame_chunks_all)
+
+        if overall_pb is not None:
+            self.progress_percentage += 1/num_stages
+            overall_pb.update(1 if not smoothing_enabled else 0)  # infiller accounted for
 
         # ── Step 5: 抖动检测与平滑 ────────────────────────────────────────
         if self.smooth_hands:
@@ -1407,6 +1432,13 @@ class HaWoRPipeline:
             )
             R_w2c_sla_all = R_c2w_sla_all.transpose(-1, -2)
             t_w2c_sla_all = -torch.einsum("bij,bj->bi", R_w2c_sla_all, t_c2w_sla_all)
+
+        # Update overall progress after smoothing stage if enabled
+        if overall_pb is not None:
+            if smoothing_enabled:
+                self.progress_percentage += 1/num_stages
+                overall_pb.update(1)
+            overall_pb.close()
 
         # ── 构建双手网格字典 ─────────────────────────────────────────────
         faces_right, faces_left = _build_faces()

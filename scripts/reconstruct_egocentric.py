@@ -1,0 +1,705 @@
+import os
+import glob
+import pickle
+import argparse
+import cv2
+import numpy as np
+from tqdm import tqdm
+import multiprocessing
+import threading
+import queue as queue_module
+import torch
+
+# --- Default Configuration ---
+DEFAULT_DATASET_ROOT = "/inspire/dataset/egocentric-10k/v20251211"
+DEFAULT_OUTPUT_ROOT = (
+    "/inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/ziyu/DATASET/egocentric-10k-hawor"
+)
+# DEFAULT_DATASET_ROOT = "./test_video"
+# DEFAULT_OUTPUT_ROOT = (
+#     "./test_results"
+# )
+
+
+def find_all_mp4_files(root_dir: str) -> list[str]:
+    """Scans a directory recursively for all .mp4 files."""
+    if not os.path.isdir(root_dir):
+        print(f"Error: Root directory '{root_dir}' not found.")
+        return []
+    pattern = os.path.join(root_dir, "**", "*.mp4")
+    mp4_files = glob.glob(pattern, recursive=True)
+    mp4_files.sort()
+    print(f"Found {len(mp4_files)} MP4 files in '{root_dir}'.")
+    return mp4_files
+
+
+def reorder_videos_by_factory_worker(all_vids: list[str], root_dir: str) -> list[str]:
+    """Reorder videos so that we round-robin across factories and their workers.
+
+    Expected folder layout (relative to `root_dir`):
+      factory_XXX/workers/worker_YYY/<videos...>
+
+    Behavior: for round r=0.., pick the r-th video from each worker in sorted(factory)->sorted(worker) order.
+    Videos that don't match the structure are appended at the end in sorted order.
+    """
+    # Build mapping: factory -> worker -> [videos]
+    mapping: dict[str, dict[str, list[str]]] = {}
+    others: list[str] = []
+
+    for v in all_vids:
+        try:
+            rel = os.path.relpath(v, root_dir)
+        except Exception:
+            rel = os.path.basename(v)
+        parts = rel.split(os.sep)
+        if len(parts) >= 3 and parts[1] == "workers":
+            factory = parts[0]
+            worker = parts[2]
+            mapping.setdefault(factory, {}).setdefault(worker, []).append(v)
+        else:
+            # not following expected structure
+            others.append(v)
+
+    # Sort videos inside each worker for deterministic order
+    for factory in mapping:
+        for worker in mapping[factory]:
+            mapping[factory][worker].sort()
+
+    # Determine max number of shards per worker
+    max_shards = 0
+    for factory in mapping:
+        for worker in mapping[factory]:
+            max_shards = max(max_shards, len(mapping[factory][worker]))
+
+    ordered: list[str] = []
+    factories_sorted = sorted(mapping.keys())
+    for r in range(max_shards):
+        for factory in factories_sorted:
+            workers_sorted = sorted(mapping[factory].keys())
+            for worker in workers_sorted:
+                vids = mapping[factory][worker]
+                if r < len(vids):
+                    ordered.append(vids[r])
+
+    # Append any remaining videos that didn't match structure or were missed
+    others.sort()
+    ordered.extend(others)
+    # As a final safety, append any videos from original list that were not included yet
+    included = set(ordered)
+    for v in all_vids:
+        if v not in included:
+            ordered.append(v)
+
+    return ordered
+
+
+# 进程级全局 pipeline 缓存（每个子进程独立持有）
+_process_pipe = None
+_process_device = None
+_process_dtype = None
+
+def _worker_process_main(
+    worker_id: int, device_str: str, dtype, task_queue, result_queue, init_queue
+):
+    """自定义进程工作函数：每个进程绑定指定 GPU，循环从任务队列取任务执行。
+
+    相比 ProcessPoolExecutor 的 initializer 只能统一参数，这里可以为每个
+    进程精确分配不同 GPU，实现真正的多 GPU 并行推理。
+
+    Args:
+        worker_id:    进程编号（用于日志）
+        device_str:   分配给此进程的 GPU，如 "cuda:0"
+        dtype:        模型推理精度
+        task_queue:   任务队列，每项为 (video_path, video_idx, progress_queue) 或 None（哨兵值）
+        result_queue: 结果队列，每项为 (video_idx, status, message)
+        init_queue:   初始化完成后上报 worker_id，主进程用于显示初始化进度
+    """
+    global _process_pipe
+    pid = os.getpid()
+    device = torch.device(device_str)
+    print(f"[Worker {worker_id} / PID {pid}] 初始化 pipeline 在 {device}", flush=True)
+    _process_pipe = WiLorHandPose3dEstimationPipeline(
+        device=device, dtype=dtype, verbose=False
+    )
+    # 通知主进程：本 Worker 初始化完成
+    init_queue.put((worker_id, device_str))
+    print(f"[Worker {worker_id} / PID {pid}] 就绪，等待任务...", flush=True)
+
+    while True:
+        task = task_queue.get()
+        if task is None:  # 哨兵值，退出
+            break
+        video_path, video_idx, progress_queue = task
+        try:
+            msg = process_video_worker_proc(video_path, video_idx, progress_queue, worker_id)
+            result_queue.put((video_idx, "ok", msg))
+        except Exception as e:
+            # 捕获所有异常，记录后继续处理下一个任务，进程不退出
+            import traceback
+
+            err_msg = f"{os.path.basename(video_path)} -> {traceback.format_exc()}"
+            result_queue.put((video_idx, "error", err_msg))
+
+
+def process_video_worker_proc(
+    video_path,
+    video_idx,
+    progress_queue,
+    worker_id=0,
+):
+    """Worker function for use in ProcessPoolExecutor.
+
+    每个子进程在进程初始化时已经创建好自己的 pipeline（_process_pipe），
+    此处直接使用，不再重复创建，彻底绕开 GIL。
+    """
+    global _process_pipe
+    pkl_path = video_path.replace(".mp4", "_wilor.pkl")
+    pkl_path = pkl_path.replace(DEFAULT_DATASET_ROOT, DEFAULT_OUTPUT_ROOT)
+    pkl_dir = os.path.dirname(pkl_path)
+    if os.path.exists(pkl_path):
+        if progress_queue is not None:
+            progress_queue.put(("done", video_idx, 0, worker_id))
+        return f"Skipped (already exists): {os.path.basename(video_path)}"
+    if not os.path.exists(pkl_dir):
+        os.makedirs(pkl_dir, exist_ok=True)
+
+    success = False
+    try:
+        keypoints_list = run_detection_on_video(
+            video_path,
+            _process_pipe,
+            progress_queue=progress_queue,
+            video_idx=video_idx,
+            worker_id=worker_id,
+            progress_every=1,
+            verbose=False,
+        )
+        if keypoints_list:
+            if os.path.exists(pkl_path):
+                return f"Skipped (already exists): {os.path.basename(video_path)}"
+            os.makedirs(os.path.dirname(pkl_path), exist_ok=True)
+            with open(pkl_path, "wb") as f:
+                pickle.dump(keypoints_list, f)
+            success = True
+            return f"Success: {os.path.basename(video_path)}"
+        else:
+            success = True
+            return f"Warning (no data): {os.path.basename(video_path)}"
+    except Exception as e:
+        import traceback
+
+        err_detail = traceback.format_exc()
+        if progress_queue is not None:
+            progress_queue.put(
+                ("error_video", video_idx, f"{os.path.basename(video_path)} -> {e}", worker_id)
+            )
+        # 不再 raise，直接返回错误字符串，让 _worker_process_main 写入 result_queue
+        return f"Error: {os.path.basename(video_path)} ->\n{err_detail}"
+    finally:
+        if success and progress_queue is not None:
+            progress_queue.put(("done", video_idx, 0, worker_id))
+
+
+def process_video_worker(video_path, pipe):
+    """
+    A worker function that handles processing and saving for a single video.
+    Designed to be called from a ProcessPoolExecutor.
+    """
+    pkl_path = video_path.replace(".mp4", "_wilor.pkl")
+    pkl_path = pkl_path.replace(DEFAULT_DATASET_ROOT, DEFAULT_OUTPUT_ROOT)
+    pkl_dir = os.path.dirname(pkl_path)
+    if os.path.exists(pkl_path):
+        return f"Skipped (already exists): {os.path.basename(video_path)}"
+    if not os.path.exists(pkl_dir):
+        os.makedirs(pkl_dir)
+
+    try:
+        keypoints_list = run_detection_on_video(video_path, pipe)
+        if keypoints_list:
+            if os.path.exists(pkl_path):
+                return f"Skipped (already exists): {os.path.basename(video_path)}"
+            os.makedirs(os.path.dirname(pkl_path), exist_ok=True)
+            with open(pkl_path, "wb") as f:
+                pickle.dump(keypoints_list, f)
+            return f"Success: {os.path.basename(video_path)}"
+        else:
+            return f"Warning (no data): {os.path.basename(video_path)}"
+    except Exception as e:
+        return f"Error: {os.path.basename(video_path)} -> {e}"
+
+
+def _get_video_frame_count(video_path: str) -> int:
+    cap = cv2.VideoCapture(video_path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return total_frames
+
+
+def run_detection_on_video(
+    video_path,
+    pipe,
+    progress_queue=None,
+    video_idx=None,
+    worker_id=0,
+    progress_every=1,
+    verbose=True,
+):
+    # Open the video file
+    # cap = cv2.VideoCapture(video_path)
+
+    # # Get video properties
+    # total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    # if verbose:
+    #     print(f"开始处理视频: {video_path}, 总帧数: {total_frames}", flush=True)
+    # 上报帧总数，主进程用于初始化进度条 total，同时携带视频名
+    if progress_queue is not None and video_idx is not None:
+        progress_queue.put(("init", video_idx, total_frames, worker_id, os.path.basename(video_path)))
+    frame_count = 0
+    keypoints_list = []
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Convert frame to RGB
+        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        outputs = pipe.predict(image)
+        pred_keypoints_3d_all = []
+
+        # print(f"frame {frame_count}")
+
+        for i, out in enumerate(outputs):
+            is_right = out["is_right"]
+            pred_keypoints_3d = out["wilor_preds"]["pred_keypoints_3d"][0]
+            pred_cam_t_full = out["wilor_preds"]["pred_cam_t_full"][0]
+            pred_keypoints_3d_in_camera = (
+                pred_keypoints_3d + pred_cam_t_full[np.newaxis, :]
+            )
+            scaled_focal_length = out["wilor_preds"]["scaled_focal_length"]
+            pred_keypoints_2d = out["wilor_preds"]["pred_keypoints_2d"][0]
+
+            hand_dict = {
+                "is_right": int(is_right),
+                "pred_keypoints_3d": pred_keypoints_3d_in_camera,
+                "pred_cam_t_full": pred_cam_t_full,
+                "scaled_focal_length": scaled_focal_length,
+                "pred_keypoints_2d": pred_keypoints_2d,
+            }
+
+            pred_keypoints_3d_all.append(hand_dict)
+        frame_count += 1
+        if (
+            progress_queue is not None
+            and video_idx is not None
+            and frame_count % progress_every == 0
+        ):
+            # 上报当前帧号，主进程换算为百分比
+            progress_queue.put(("progress", video_idx, frame_count, worker_id))
+        keypoints_list.append(pred_keypoints_3d_all)
+
+    # Release everything
+    cap.release()
+    return keypoints_list
+
+
+def check_single_pkl(pkl_path, verbose=True):
+    if not os.path.exists(pkl_path):
+        if verbose:
+            print(f"Error: File not found - {pkl_path}")
+        return False
+    try:
+        with open(pkl_path, "rb") as f:
+            data = pickle.load(f)
+    except Exception as e:
+        if verbose:
+            print(f"Error loading {pkl_path}: {str(e)}")
+        # delete crushed files
+
+        try:
+            os.remove(pkl_path)
+            print(f"文件 '{pkl_path}' 删除成功。")
+        except FileNotFoundError:
+            print(f"文件 '{pkl_path}' 不存在，无法删除。")
+        except OSError as e:
+            print(f"删除文件时出错：{e}")
+
+        return False
+    if not isinstance(data, list):
+        if verbose:
+            print(f"Invalid structure: {pkl_path} is not a list")
+        return False
+    if len(data) == 0:
+        if verbose:
+            print(f"Empty: {pkl_path} is empty! ")
+        return False
+    valid = True
+    for frame_idx, frame_data in enumerate(data):
+        if not isinstance(frame_data, list):
+            if verbose:
+                print(f"Frame {frame_idx} in {pkl_path} is not a list")
+            valid = False
+            continue
+        for hand_idx, hand_data in enumerate(frame_data):
+            if not isinstance(hand_data, dict):
+                if verbose:
+                    print(
+                        f"Hand data {hand_idx} in frame {frame_idx} of {pkl_path} is not a dict"
+                    )
+                valid = False
+                continue
+            if "is_right" not in hand_data or "pred_keypoints_3d" not in hand_data:
+                if verbose:
+                    print(
+                        f"Missing keys in hand data {hand_idx}, frame {frame_idx} of {pkl_path}"
+                    )
+                valid = False
+                continue
+            if not isinstance(hand_data["is_right"], int):
+                if verbose:
+                    print(
+                        f"is_right in hand data {hand_idx}, frame {frame_idx} of {pkl_path} is not an int"
+                    )
+                valid = False
+            kp_3d = hand_data["pred_keypoints_3d"]
+            if not isinstance(kp_3d, list) and not isinstance(kp_3d, np.ndarray):
+                if verbose:
+                    print(
+                        f"pred_keypoints_3d in hand data {hand_idx}, frame {frame_idx} of {pkl_path} is not a list or np.ndarray"
+                    )
+                valid = False
+                continue
+    return valid
+
+
+def check_pkl_files(video_list, verbose=True):
+    # ... (code is identical)
+    results = {}
+    for video_path in tqdm(video_list, desc="Checking pkl files", unit="video"):
+        pkl_path = video_path.replace(".mp4", "_wilor.pkl")
+        pkl_path = pkl_path.replace(DEFAULT_DATASET_ROOT, DEFAULT_OUTPUT_ROOT)
+        valid = check_single_pkl(pkl_path, verbose=verbose)
+        results[pkl_path] = valid
+    return results
+
+
+def print_summary(results):
+    # ... (code is identical)
+    total = len(results)
+    if total == 0:
+        print("\nSummary: No files to check.")
+        return
+    valid_count = sum(1 for v in results.values() if v)
+    invalid_files = [k for k, v in results.items() if not v]
+    print(f"\nSummary:")
+    print(f"Total files checked: {total}")
+    print(f"Valid files: {valid_count}")
+    print(f"Invalid files: {len(invalid_files)}")
+
+def process_multi_workers(args, dtype, selected_vid_list):
+    # 检测所有可用 GPU，按进程数轮询分配
+    if torch.cuda.is_available():
+        num_gpus = torch.cuda.device_count()
+        gpu_devices = [f"cuda:{i}" for i in range(num_gpus)]
+        print(f"检测到 {num_gpus} 张 GPU: {gpu_devices}")
+    else:
+        gpu_devices = ["cpu"]
+        print("未检测到 GPU，使用 CPU。")
+
+    # 为每个进程分配一张 GPU（轮询）
+    num_workers = args.num_workers
+    device_assignments = [
+        gpu_devices[i % len(gpu_devices)] for i in range(num_workers)
+    ]
+    print(f"进程数: {num_workers}，进程-GPU 分配: {device_assignments}")
+
+    # 使用 multiprocessing.Manager 创建跨进程共享队列
+    mp_ctx = multiprocessing.get_context("spawn")
+    mp_manager = multiprocessing.Manager()
+    progress_queue = mp_manager.Queue()  # 子进程 -> 主进程的进度上报
+    task_queue = mp_manager.Queue()  # 主进程 -> 子进程的任务分发
+    result_queue = mp_manager.Queue()  # 子进程 -> 主进程的结果上报
+
+    # 启动自定义进程池：每个进程绑定特定 GPU
+    init_queue = mp_manager.Queue()  # 子进程 -> 主进程的初始化完成通知
+    workers = []
+    for wid, dev_str in enumerate(device_assignments):
+        p = mp_ctx.Process(
+            target=_worker_process_main,
+            args=(wid, dev_str, dtype, task_queue, result_queue, init_queue),
+            daemon=True,
+            name=f"WilorWorker-{wid}",
+        )
+        p.start()
+        workers.append(p)
+
+    # 等待所有 Worker 初始化完成（含进度条显示）
+    print(f"等待 {num_workers} 个 Worker 完成 GPU/Pipeline 初始化...", flush=True)
+    with tqdm(
+        total=num_workers,
+        desc="Worker Init",
+        unit="worker",
+        position=0,
+        dynamic_ncols=True
+    ) as init_pbar:
+        ready_count = 0
+        while ready_count < num_workers:
+            try:
+                wid, dev = init_queue.get() 
+                init_pbar.set_postfix_str(f"Worker-{wid} on {dev} ready")
+                init_pbar.update(1)
+                ready_count += 1
+            except Exception:
+                # 检查是否有进程已死
+                dead = [p for p in workers if not p.is_alive() and p.exitcode not in (0, None)]
+                if dead:
+                    raise RuntimeError(
+                        f"Worker 初始化期间进程意外退出: "
+                        f"{[f'{p.name}(exitcode={p.exitcode})' for p in dead]}"
+                    )
+    print("所有 Worker 初始化完成，开始投递任务。", flush=True)
+
+    # 向任务队列投递所有视频任务
+    for idx, video_path in enumerate(selected_vid_list):
+        task_queue.put((video_path, idx, progress_queue))
+    # 投递哨兵值，每个进程收到后退出
+    for _ in workers:
+        task_queue.put(None)
+
+    # 每个 worker 一个进度条，按进程 id 固定位置
+    # worker_frame_counts[wid] 保存该 worker 当前视频的总帧数
+    worker_frame_counts = [None] * num_workers
+
+    # 总进度条（position=0）+ 每个 worker 的进度条（position=1..num_workers）
+    total_pbar = tqdm(
+        total=len(selected_vid_list),
+        desc="All videos",
+        position=0,
+        unit="video",
+        dynamic_ncols=True,
+    )
+    worker_pbars = [
+        tqdm(
+            total=100,
+            desc=f"Worker-{i} [idle]",
+            position=i + 1,
+            leave=True,
+            unit="frame",
+            dynamic_ncols=True,
+        )
+        for i in range(num_workers)
+    ]
+
+    stop_event = threading.Event()
+    # 已完成的视频数
+    finished = [False] * len(selected_vid_list)
+
+    def progress_listener():
+        """主进程监听线程：同时消费 progress_queue（帧进度）和 result_queue（完成通知）。"""
+        while not stop_event.is_set():
+            # --- 消费帧进度 ---
+            while True:
+                try:
+                    item = progress_queue.get_nowait()
+                except Exception:
+                    break
+                msg_type = item[0]
+                vidx = item[1]
+                payload = item[2]
+                wid = item[3] if len(item) > 3 else 0
+                if msg_type == "init":
+                    # item = ("init", vidx, total_frames, wid, video_name)
+                    total_frames = payload
+                    video_name = item[4] if len(item) > 4 else f"video[{vidx}]"
+                    worker_frame_counts[wid] = total_frames
+                    bar = worker_pbars[wid]
+                    bar.total = total_frames
+                    bar.n = 0
+                    bar.set_description(f"W{wid} {video_name[:28]}")
+                    bar.refresh()
+                elif msg_type == "progress":
+                    bar = worker_pbars[wid]
+                    current_frame = payload
+                    total = worker_frame_counts[wid]
+                    new_n = min(current_frame, total) if total else current_frame
+                    if new_n > bar.n:
+                        bar.n = new_n
+                        bar.refresh()
+                elif msg_type == "done":
+                    # 视频处理完，进度条置满并重置为 idle
+                    bar = worker_pbars[wid]
+                    bar.n = bar.total if bar.total else 100
+                    bar.refresh()
+                elif msg_type == "error_video":
+                    # 单个视频出错，只打印日志，不终止全局
+                    tqdm.write(f"[ERROR] {payload}")
+
+            # --- 消费结果（视频完成）---
+            while True:
+                try:
+                    vidx, status, msg = result_queue.get_nowait()
+                except Exception:
+                    break
+                if not finished[vidx]:
+                    finished[vidx] = True
+                    total_pbar.update(1)
+
+                if status == "ok":
+                    tqdm.write(msg)
+                else:
+                    # 单个视频错误，只记录，不停止整体流程
+                    tqdm.write(f"[ERROR] {msg}")
+
+            if all(finished):
+                break
+
+            stop_event.wait(timeout=0.1)  # 短暂休眠，避免忙等
+
+    listener_thread = threading.Thread(target=progress_listener, daemon=True)
+    listener_thread.start()
+
+    # 等待监听线程退出（即所有视频处理完毕）
+    while listener_thread.is_alive():
+        # 检查工作进程是否意外退出（exitcode != 0 且不是正常退出）
+        dead = [
+            p
+            for p in workers
+            if not p.is_alive() and p.exitcode not in (0, None)
+        ]
+        if dead:
+            tqdm.write(
+                f"[WARN] 以下工作进程意外退出（将继续等待其他进程完成）: "
+                f"{[f'{p.name}(exitcode={p.exitcode})' for p in dead]}"
+            )
+            # 意外死亡的进程负责的任务不会再有结果写入 result_queue，
+            # 将所有尚未完成的任务标记为 error，避免监听线程永久阻塞
+            for vidx in range(len(selected_vid_list)):
+                if not finished[vidx]:
+                    result_queue.put(
+                        (vidx, "error", f"video[{vidx}] 所在工作进程意外崩溃")
+                    )
+            for p in dead:
+                workers.remove(p)
+        listener_thread.join(timeout=1.0)
+
+    stop_event.set()
+    listener_thread.join(timeout=5)
+
+    # 关闭所有进度条
+    for bar in worker_pbars:
+        if bar is None:
+            continue
+        bar.set_description(f"{bar.desc.split(' ')[0]} [done]")
+        bar.refresh()
+        bar.close()
+    total_pbar.n = len(selected_vid_list)
+    total_pbar.refresh()
+    total_pbar.close()
+
+    # 等待所有子进程正常退出
+    for p in workers:
+        p.join(timeout=30)
+        if p.is_alive():
+            p.terminate()
+
+    mp_manager.shutdown()
+
+    tqdm.write("\n--- 所有视频处理完毕 ---")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Process videos to extract hand keypoints using MediaPipe."
+    )
+    parser.add_argument(
+        "--dataroot",
+        type=str,
+        default=DEFAULT_DATASET_ROOT,
+        help="Root directory of the dataset.",
+    )
+    parser.add_argument(
+        "--start", type=int, default=0, help="Starting index for video processing."
+    )
+    parser.add_argument(
+        "--end",
+        type=int,
+        default=None,
+        help="Ending index for video processing (exclusive).",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Only check existing pkl files without processing videos.",
+    )
+    parser.add_argument(
+        "--no-interleave",
+        action="store_false",
+        dest="interleave",
+        help="Disable interleaving by factory/worker. By default interleaving is enabled.",
+    )
+    # New argument for controlling parallelism
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of CPU processes to use for parallel processing. Use 1 for sequential execution.",
+    )
+
+    args = parser.parse_args()
+
+    all_vid_list = find_all_mp4_files(args.dataroot)
+    if args.interleave:
+        print("Applying factory/worker interleaving to video list...")
+        all_vid_list = reorder_videos_by_factory_worker(all_vid_list, args.dataroot)
+    if not all_vid_list:
+        print("No MP4 files found. Exiting.")
+        exit()
+    print(f"Total Videos: {len(all_vid_list)}")
+
+    if args.end is None:
+        args.end = len(all_vid_list)
+    selected_vid_list = all_vid_list[
+        args.start : args.end
+    ]  # todo: 重新处理排序逻辑，使得每个factory的worker的视频首先被遍历一次
+    print(f"Process: {len(selected_vid_list)}")
+    print("Selected Videos:")
+    print(selected_vid_list[:10])
+
+    if not selected_vid_list:
+        print("No videos selected based on start/end indices. Exiting.")
+        exit()
+    print(
+        f"Selected {len(selected_vid_list)} videos for processing (indices from {args.start} to {args.end})."
+    )
+
+    if args.check:
+        print("Running in check-only mode.")
+        results = check_pkl_files(selected_vid_list, verbose=True)
+        print_summary(results)
+        exit()
+
+    device = (
+        torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    )
+    dtype = torch.float16
+    print("Running in detection mode.")
+    # If num_workers <= 1, keep sequential processing to preserve original behaviour.
+    if args.num_workers <= 1:
+        pipe = WiLorHandPose3dEstimationPipeline(
+            device=device, dtype=dtype, verbose=False
+        )
+        for video_path in tqdm(
+            selected_vid_list, desc="Processing videos", unit="video"
+        ):
+            print(process_video_worker(video_path, pipe))
+    else:
+        process_multi_workers(args, dtype, selected_vid_list)
+
+    print("\n--- Detection complete. Now checking generated PKL files ---")
+    results = check_pkl_files(selected_vid_list, verbose=True)
+    print_summary(results)
+
+# --- Main Execution Block ---
+if __name__ == "__main__":
+    # Windows 上使用 spawn 启动子进程时，必须把主逻辑放在此保护块内，
+    # 否则子进程 import 模块时会再次执行顶层代码，导致递归启动。
+    multiprocessing.freeze_support()
+    main()
