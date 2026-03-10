@@ -23,7 +23,7 @@ xvfb-run -a python reconstruct.py --video_path example/video_0.mp4 --output_dir 
 import argparse
 import numpy as np
 from glob import glob
-from lib.pipeline.tools import detect_track
+
 from natsort import natsorted
 import subprocess
 import argparse
@@ -31,6 +31,8 @@ import sys
 import os
 import cv2
 import torch
+# 将当前脚本的父目录（即根目录）加入路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
@@ -42,7 +44,7 @@ from scripts.scripts_test_video.hawor_slam import hawor_slam
 from hawor.utils.process import get_mano_faces, run_mano, run_mano_left
 from lib.eval_utils.custom_utils import load_slam_cam
 from lib.pipeline.HaWoRPipeline import HaWoRPipeline, HaWoRConfig
-
+from lib.pipeline.tools import detect_track
 
 
 # ---------------------------------------------------------------------------

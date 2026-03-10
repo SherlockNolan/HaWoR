@@ -1406,7 +1406,7 @@ class HaWoRPipeline:
 
         if overall_pb is not None:
             self.progress_percentage += 1/num_stages
-            overall_pb.update(1 if not smoothing_enabled else 0)  # infiller accounted for
+            overall_pb.update(1)  # infiller accounted for
 
         # ── Step 5: 抖动检测与平滑 ────────────────────────────────────────
         if self.smooth_hands:
