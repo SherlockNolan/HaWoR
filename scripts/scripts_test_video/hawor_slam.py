@@ -94,9 +94,9 @@ def hawor_slam(args, start_idx, end_idx):
     torch.cuda.empty_cache()
 
     # Estimate scale  
-    block_print()  
+    # block_print()  
     metric = Metric3D('thirdparty/Metric3D/weights/metric_depth_vit_large_800k.pth') 
-    enable_print() 
+    # enable_print() 
     min_threshold = 0.4
     max_threshold = 0.7
 

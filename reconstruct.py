@@ -97,8 +97,13 @@ def main():
         infiller_weight = args.infiller_weight,
         verbose         = True,
     )
-
     reconstructor = HaWoRPipeline(haworConfig)
+    
+    import time
+
+    start_time = time.perf_counter()
+
+    # 这里放置你的代码
 
     result = reconstructor.reconstruct(
         video_path = args.video_path,
@@ -107,8 +112,11 @@ def main():
         vis_mode   = args.vis_mode,
         image_focal= args.image_focal
     )
+    
+    end_time = time.perf_counter()
 
     print("\n=== Reconstruction complete ===")
+    print(f"消耗时间（不含初始化）: {end_time - start_time:.6f} 秒")
     print(f"  seq_folder    : {result['seq_folder']}") # 用于rendering的时候extract_frames的临时图片生成目录
     print(f"  img_focal     : {result['img_focal']}")
     print(f"  pred_trans    : {result['pred_trans'].shape}")
