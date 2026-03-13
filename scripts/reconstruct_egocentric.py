@@ -9,16 +9,26 @@ import multiprocessing
 import threading
 import queue as queue_module
 import torch
-
+import time
+import os
+import contextlib
+# --- HaWoR Imports ---
+# 将当前脚本的父目录（即根目录）加入路径
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.pipeline.HaWoRPipeline import HaWoRPipeline, HaWoRConfig
+ from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints
 # --- Default Configuration ---
 DEFAULT_DATASET_ROOT = "/inspire/dataset/egocentric-10k/v20251211"
 DEFAULT_OUTPUT_ROOT = (
     "/inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/ziyu/DATASET/egocentric-10k-hawor"
 )
-# DEFAULT_DATASET_ROOT = "./test_video"
-# DEFAULT_OUTPUT_ROOT = (
-#     "./test_results"
-# )
+DEFAULT_DATASET_ROOT_TEST = "./test_video"
+DEFAULT_OUTPUT_ROOT_TEST = (
+    "./test_results"
+)
+dataset_root: str # 全局引用，后面被参数更新
+output_root: str
 
 
 def find_all_mp4_files(root_dir: str) -> list[str]:
@@ -118,9 +128,11 @@ def _worker_process_main(
     pid = os.getpid()
     device = torch.device(device_str)
     print(f"[Worker {worker_id} / PID {pid}] 初始化 pipeline 在 {device}", flush=True)
-    _process_pipe = WiLorHandPose3dEstimationPipeline(
-        device=device, dtype=dtype, verbose=False
-    )
+    
+    # 使用 HaWoRPipeline
+    cfg = HaWoRConfig(verbose=False)
+    _process_pipe = HaWoRPipeline(cfg)
+    
     # 通知主进程：本 Worker 初始化完成
     init_queue.put((worker_id, device_str))
     print(f"[Worker {worker_id} / PID {pid}] 就绪，等待任务...", flush=True)
@@ -153,8 +165,8 @@ def process_video_worker_proc(
     此处直接使用，不再重复创建，彻底绕开 GIL。
     """
     global _process_pipe
-    pkl_path = video_path.replace(".mp4", "_wilor.pkl")
-    pkl_path = pkl_path.replace(DEFAULT_DATASET_ROOT, DEFAULT_OUTPUT_ROOT)
+    pkl_path = video_path.replace(".mp4", "_hawor.pkl")
+    pkl_path = pkl_path.replace(dataset_root, output_root)
     pkl_dir = os.path.dirname(pkl_path)
     if os.path.exists(pkl_path):
         if progress_queue is not None:
@@ -165,21 +177,39 @@ def process_video_worker_proc(
 
     success = False
     try:
-        keypoints_list = run_detection_on_video(
-            video_path,
-            _process_pipe,
-            progress_queue=progress_queue,
-            video_idx=video_idx,
-            worker_id=worker_id,
-            progress_every=1,
-            verbose=False,
-        )
-        if keypoints_list:
-            if os.path.exists(pkl_path):
-                return f"Skipped (already exists): {os.path.basename(video_path)}"
-            os.makedirs(os.path.dirname(pkl_path), exist_ok=True)
+        # 启动进度监听线程（针对 HaWoR 的百分比进度）
+        stop_monitoring = threading.Event()
+        def monitor_progress():
+            last_p = -1.0
+            while not stop_monitoring.is_set():
+                p = getattr(_process_pipe, "progress_percentage", 0.0)
+                if p != last_p:
+                    if progress_queue is not None:
+                        progress_queue.put(("progress", video_idx, p, worker_id))
+                    last_p = p
+                time.sleep(0.1)
+        
+        mon_thread = threading.Thread(target=monitor_progress, daemon=True)
+        mon_thread.start()
+
+        if progress_queue is not None:
+             progress_queue.put(("init", video_idx, 1.0, worker_id, os.path.basename(video_path)))
+
+        
+        with open(os.devnull, "w") as devnull:
+            with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                result_dict_origin = _process_pipe.reconstruct(video_path, output_dir=pkl_dir) # 屏蔽原有输出
+                result_dict = dict()
+                result_dict["original_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=False)
+                result_dict["smoothed_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=True)
+        # result_dict = _process_pipe.reconstruct(video_path, output_dir=pkl_dir)
+        
+        stop_monitoring.set()
+        mon_thread.join()
+
+        if result_dict:
             with open(pkl_path, "wb") as f:
-                pickle.dump(keypoints_list, f)
+                pickle.dump(result_dict, f)
             success = True
             return f"Success: {os.path.basename(video_path)}"
         else:
@@ -191,13 +221,14 @@ def process_video_worker_proc(
         err_detail = traceback.format_exc()
         if progress_queue is not None:
             progress_queue.put(
-                ("error_video", video_idx, f"{os.path.basename(video_path)} -> {e}", worker_id)
+                ("error_video", video_idx, f"{os.path.basename(video_path)} -> {err_detail}", worker_id)
             )
         # 不再 raise，直接返回错误字符串，让 _worker_process_main 写入 result_queue
+        print(err_detail)
         return f"Error: {os.path.basename(video_path)} ->\n{err_detail}"
     finally:
         if success and progress_queue is not None:
-            progress_queue.put(("done", video_idx, 0, worker_id))
+            progress_queue.put(("done", video_idx, 1.0, worker_id))
 
 
 def process_video_worker(video_path, pipe):
@@ -205,27 +236,26 @@ def process_video_worker(video_path, pipe):
     A worker function that handles processing and saving for a single video.
     Designed to be called from a ProcessPoolExecutor.
     """
-    pkl_path = video_path.replace(".mp4", "_wilor.pkl")
-    pkl_path = pkl_path.replace(DEFAULT_DATASET_ROOT, DEFAULT_OUTPUT_ROOT)
+    pkl_path = video_path.replace(".mp4", "_hawor.pkl")
+    pkl_path = pkl_path.replace(dataset_root, output_root)
     pkl_dir = os.path.dirname(pkl_path)
     if os.path.exists(pkl_path):
         return f"Skipped (already exists): {os.path.basename(video_path)}"
     if not os.path.exists(pkl_dir):
-        os.makedirs(pkl_dir)
+        os.makedirs(pkl_dir, exist_ok=True)
 
     try:
-        keypoints_list = run_detection_on_video(video_path, pipe)
-        if keypoints_list:
-            if os.path.exists(pkl_path):
-                return f"Skipped (already exists): {os.path.basename(video_path)}"
-            os.makedirs(os.path.dirname(pkl_path), exist_ok=True)
+        result_dict = pipe.reconstruct(video_path, output_dir=pkl_dir)
+        if result_dict:
             with open(pkl_path, "wb") as f:
-                pickle.dump(keypoints_list, f)
+                pickle.dump(result_dict, f)
             return f"Success: {os.path.basename(video_path)}"
         else:
             return f"Warning (no data): {os.path.basename(video_path)}"
     except Exception as e:
-        return f"Error: {os.path.basename(video_path)} -> {e}"
+        import traceback
+        import contextlib
+        return f"Error: {os.path.basename(video_path)} -> {e}\n{traceback.format_exc()}"
 
 
 def _get_video_frame_count(video_path: str) -> int:
@@ -233,73 +263,6 @@ def _get_video_frame_count(video_path: str) -> int:
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
     return total_frames
-
-
-def run_detection_on_video(
-    video_path,
-    pipe,
-    progress_queue=None,
-    video_idx=None,
-    worker_id=0,
-    progress_every=1,
-    verbose=True,
-):
-    # Open the video file
-    # cap = cv2.VideoCapture(video_path)
-
-    # # Get video properties
-    # total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    # if verbose:
-    #     print(f"开始处理视频: {video_path}, 总帧数: {total_frames}", flush=True)
-    # 上报帧总数，主进程用于初始化进度条 total，同时携带视频名
-    if progress_queue is not None and video_idx is not None:
-        progress_queue.put(("init", video_idx, total_frames, worker_id, os.path.basename(video_path)))
-    frame_count = 0
-    keypoints_list = []
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        # Convert frame to RGB
-        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        outputs = pipe.predict(image)
-        pred_keypoints_3d_all = []
-
-        # print(f"frame {frame_count}")
-
-        for i, out in enumerate(outputs):
-            is_right = out["is_right"]
-            pred_keypoints_3d = out["wilor_preds"]["pred_keypoints_3d"][0]
-            pred_cam_t_full = out["wilor_preds"]["pred_cam_t_full"][0]
-            pred_keypoints_3d_in_camera = (
-                pred_keypoints_3d + pred_cam_t_full[np.newaxis, :]
-            )
-            scaled_focal_length = out["wilor_preds"]["scaled_focal_length"]
-            pred_keypoints_2d = out["wilor_preds"]["pred_keypoints_2d"][0]
-
-            hand_dict = {
-                "is_right": int(is_right),
-                "pred_keypoints_3d": pred_keypoints_3d_in_camera,
-                "pred_cam_t_full": pred_cam_t_full,
-                "scaled_focal_length": scaled_focal_length,
-                "pred_keypoints_2d": pred_keypoints_2d,
-            }
-
-            pred_keypoints_3d_all.append(hand_dict)
-        frame_count += 1
-        if (
-            progress_queue is not None
-            and video_idx is not None
-            and frame_count % progress_every == 0
-        ):
-            # 上报当前帧号，主进程换算为百分比
-            progress_queue.put(("progress", video_idx, frame_count, worker_id))
-        keypoints_list.append(pred_keypoints_3d_all)
-
-    # Release everything
-    cap.release()
-    return keypoints_list
 
 
 def check_single_pkl(pkl_path, verbose=True):
@@ -324,51 +287,18 @@ def check_single_pkl(pkl_path, verbose=True):
             print(f"删除文件时出错：{e}")
 
         return False
-    if not isinstance(data, list):
+    if not isinstance(data, dict):
         if verbose:
-            print(f"Invalid structure: {pkl_path} is not a list")
+            print(f"Invalid structure: {pkl_path} is not a dict")
         return False
-    if len(data) == 0:
-        if verbose:
-            print(f"Empty: {pkl_path} is empty! ")
-        return False
-    valid = True
-    for frame_idx, frame_data in enumerate(data):
-        if not isinstance(frame_data, list):
+    # HaWoR result keys check
+    required_keys = ['pred_trans', 'pred_rot', 'pred_hand_pose', 'R_c2w', 't_c2w']
+    for k in required_keys:
+        if k not in data:
             if verbose:
-                print(f"Frame {frame_idx} in {pkl_path} is not a list")
-            valid = False
-            continue
-        for hand_idx, hand_data in enumerate(frame_data):
-            if not isinstance(hand_data, dict):
-                if verbose:
-                    print(
-                        f"Hand data {hand_idx} in frame {frame_idx} of {pkl_path} is not a dict"
-                    )
-                valid = False
-                continue
-            if "is_right" not in hand_data or "pred_keypoints_3d" not in hand_data:
-                if verbose:
-                    print(
-                        f"Missing keys in hand data {hand_idx}, frame {frame_idx} of {pkl_path}"
-                    )
-                valid = False
-                continue
-            if not isinstance(hand_data["is_right"], int):
-                if verbose:
-                    print(
-                        f"is_right in hand data {hand_idx}, frame {frame_idx} of {pkl_path} is not an int"
-                    )
-                valid = False
-            kp_3d = hand_data["pred_keypoints_3d"]
-            if not isinstance(kp_3d, list) and not isinstance(kp_3d, np.ndarray):
-                if verbose:
-                    print(
-                        f"pred_keypoints_3d in hand data {hand_idx}, frame {frame_idx} of {pkl_path} is not a list or np.ndarray"
-                    )
-                valid = False
-                continue
-    return valid
+                print(f"Missing key {k} in {pkl_path}")
+            return False
+    return True
 
 
 def check_pkl_files(video_list, verbose=True):
@@ -376,7 +306,7 @@ def check_pkl_files(video_list, verbose=True):
     results = {}
     for video_path in tqdm(video_list, desc="Checking pkl files", unit="video"):
         pkl_path = video_path.replace(".mp4", "_wilor.pkl")
-        pkl_path = pkl_path.replace(DEFAULT_DATASET_ROOT, DEFAULT_OUTPUT_ROOT)
+        pkl_path = pkl_path.replace(dataset_root, output_root)
         valid = check_single_pkl(pkl_path, verbose=verbose)
         results[pkl_path] = valid
     return results
@@ -493,10 +423,28 @@ def process_multi_workers(args, dtype, selected_vid_list):
     # 已完成的视频数
     finished = [False] * len(selected_vid_list)
 
+    def _worker_progress_handler(wid, vidx, payload, msg_type, worker_pbars, worker_frame_counts, video_name=None):
+        bar = worker_pbars[wid]
+        if msg_type == "init":
+            # 对于 HaWoR，payload 约定为 1.0 (表示 100%)
+            bar.total = 100
+            bar.n = 0
+            bar.set_description(f"W{wid} {video_name[:28]}")
+            bar.refresh()
+        elif msg_type == "progress":
+            # payload 是 0-1 的浮点数
+            new_n = int(payload * 100)
+            if new_n > bar.n:
+                bar.n = new_n
+                bar.refresh()
+        elif msg_type == "done":
+            bar.n = 100
+            bar.refresh()
+
     def progress_listener():
         """主进程监听线程：同时消费 progress_queue（帧进度）和 result_queue（完成通知）。"""
         while not stop_event.is_set():
-            # --- 消费帧进度 ---
+            # --- 消费进度 ---
             while True:
                 try:
                     item = progress_queue.get_nowait()
@@ -506,31 +454,11 @@ def process_multi_workers(args, dtype, selected_vid_list):
                 vidx = item[1]
                 payload = item[2]
                 wid = item[3] if len(item) > 3 else 0
-                if msg_type == "init":
-                    # item = ("init", vidx, total_frames, wid, video_name)
-                    total_frames = payload
-                    video_name = item[4] if len(item) > 4 else f"video[{vidx}]"
-                    worker_frame_counts[wid] = total_frames
-                    bar = worker_pbars[wid]
-                    bar.total = total_frames
-                    bar.n = 0
-                    bar.set_description(f"W{wid} {video_name[:28]}")
-                    bar.refresh()
-                elif msg_type == "progress":
-                    bar = worker_pbars[wid]
-                    current_frame = payload
-                    total = worker_frame_counts[wid]
-                    new_n = min(current_frame, total) if total else current_frame
-                    if new_n > bar.n:
-                        bar.n = new_n
-                        bar.refresh()
-                elif msg_type == "done":
-                    # 视频处理完，进度条置满并重置为 idle
-                    bar = worker_pbars[wid]
-                    bar.n = bar.total if bar.total else 100
-                    bar.refresh()
-                elif msg_type == "error_video":
-                    # 单个视频出错，只打印日志，不终止全局
+                
+                video_name = item[4] if len(item) > 4 else None
+                _worker_progress_handler(wid, vidx, payload, msg_type, worker_pbars, worker_frame_counts, video_name)
+                
+                if msg_type == "error_video":
                     tqdm.write(f"[ERROR] {payload}")
 
             # --- 消费结果（视频完成）---
@@ -616,6 +544,12 @@ def main():
         help="Root directory of the dataset.",
     )
     parser.add_argument(
+        "--output",
+        type=str,
+        default=DEFAULT_OUTPUT_ROOT,
+        help="Root directory of the dataset.",
+    )
+    parser.add_argument(
         "--start", type=int, default=0, help="Starting index for video processing."
     )
     parser.add_argument(
@@ -630,10 +564,15 @@ def main():
         help="Only check existing pkl files without processing videos.",
     )
     parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Using test video.",
+    )
+    parser.add_argument(
         "--no-interleave",
         action="store_false",
         dest="interleave",
-        help="Disable interleaving by factory/worker. By default interleaving is enabled.",
+        help="Disable interleaving by factory/worker. By default interleaving is enabled. 取消轮询式优先遍历每个不同种类的视频",
     )
     # New argument for controlling parallelism
     parser.add_argument(
@@ -644,6 +583,15 @@ def main():
     )
 
     args = parser.parse_args()
+    
+    if args.test:
+        args.dataroot = DEFAULT_DATASET_ROOT_TEST
+        args.output = DEFAULT_OUTPUT_ROOT_TEST
+    
+    global dataset_root, output_root
+    dataset_root = args.dataroot
+    output_root = args.output
+        
 
     all_vid_list = find_all_mp4_files(args.dataroot)
     if args.interleave:
@@ -683,9 +631,8 @@ def main():
     print("Running in detection mode.")
     # If num_workers <= 1, keep sequential processing to preserve original behaviour.
     if args.num_workers <= 1:
-        pipe = WiLorHandPose3dEstimationPipeline(
-            device=device, dtype=dtype, verbose=False
-        )
+        cfg = HaWoRConfig(verbose=False)
+        pipe = HaWoRPipeline(cfg)
         for video_path in tqdm(
             selected_vid_list, desc="Processing videos", unit="video"
         ):

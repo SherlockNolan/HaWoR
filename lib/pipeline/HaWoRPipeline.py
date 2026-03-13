@@ -66,6 +66,191 @@ from scipy.spatial.transform import Slerp
 from scipy.interpolate import CubicSpline
 
 # ---------------------------------------------------------------------------
+# 懒加载视频帧序列（按需从磁盘读帧，避免一次性全部载入内存）
+# ---------------------------------------------------------------------------
+
+class LazyVideoFrames:
+    """
+    按需从视频文件中读取帧的懒加载序列。
+
+    支持的访问方式（与 numpy ndarray 接口兼容）：
+      - len(v)                     → 总帧数
+      - v[i]                       → 读取第 i 帧 (int/np.integer)
+      - v[array_like]              → 按帧号列表批量读取，返回 np.ndarray (N,H,W,3)
+      - v[start:stop:step]         → 切片，返回新的 LazyVideoFrames 子视图
+      - iter(v)                    → 顺序逐帧迭代
+      - v.shape                    → (N, H, W, 3) 虚拟形状
+
+    所有帧均以 BGR uint8 格式返回，与 cv2.imread / cv2.VideoCapture 一致。
+    """
+
+    def __init__(
+        self,
+        video_path: str,
+        indices: "list[int] | None" = None,
+        frame_step: int = 1,
+        start_idx: int = 0,
+        end_idx: "int | None" = None,
+    ):
+        """
+        Parameters
+        ----------
+        video_path : str
+            视频文件路径。
+        indices : list[int] | None
+            若给定，则直接以此作为帧索引列表（忽略 start/end/step）。
+        frame_step : int
+            采样步长。
+        start_idx : int
+            起始帧（包含）。
+        end_idx : int | None
+            终止帧（不含）；None 表示到末尾。
+        """
+        self.video_path = str(video_path)
+
+        # 先探测视频信息
+        cap = cv2.VideoCapture(self.video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {self.video_path}")
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+
+        self._total_video_frames = total
+        self._frame_wh = (w, h)  # (width, height)
+
+        if indices is not None:
+            self._indices = list(indices)
+        else:
+            _end = end_idx if (end_idx is not None and end_idx != -1) else total
+            self._indices = list(range(start_idx, _end, frame_step))
+
+    # ------------------------------------------------------------------
+    # 公开属性
+    # ------------------------------------------------------------------
+
+    @property
+    def shape(self):
+        """虚拟形状 (N, H, W, 3)，与 numpy array 接口一致。"""
+        h, w = self._frame_wh[1], self._frame_wh[0]
+        return (len(self._indices), h, w, 3)
+
+    def __len__(self):
+        return len(self._indices)
+
+    # ------------------------------------------------------------------
+    # 索引 / 切片
+    # ------------------------------------------------------------------
+
+    def __getitem__(self, key):
+        # ── 整数索引 ─────────────────────────────────────────────────────
+        if isinstance(key, (int, np.integer)):
+            idx = int(key)
+            if idx < 0:
+                idx += len(self._indices)
+            if not (0 <= idx < len(self._indices)):
+                raise IndexError(f"index {key} out of range for LazyVideoFrames with {len(self._indices)} frames")
+            return self._read_single(self._indices[idx])
+
+        # ── 切片 ──────────────────────────────────────────────────────────
+        if isinstance(key, slice):
+            sub_indices = self._indices[key]
+            return LazyVideoFrames(self.video_path, indices=sub_indices)
+
+        # ── numpy array / list / tuple（随机多帧访问）───────────────────
+        if isinstance(key, (np.ndarray, list, tuple)):
+            key_arr = np.asarray(key)
+            if key_arr.ndim == 0:
+                return self._read_single(self._indices[int(key_arr)])
+            # 将相对索引映射到全局帧号
+            global_indices = [self._indices[int(i)] for i in key_arr]
+            return self._read_batch(global_indices)
+
+        raise TypeError(f"Unsupported index type: {type(key)}")
+
+    # ------------------------------------------------------------------
+    # 迭代
+    # ------------------------------------------------------------------
+
+    def __iter__(self):
+        """
+        顺序逐帧迭代，真正的流式处理——每次只在内存中保留一帧。
+
+        策略：
+        - 若 _indices 是单调递增（无乱序），则顺序读取，不重复 seek，效率最高。
+        - 若 _indices 有间隔（如 stride>1），则每次 seek 到目标帧后读取。
+        - 每帧 yield 完毕即可被 GC 回收，不会累积内存。
+        """
+        if not self._indices:
+            return
+
+        cap = cv2.VideoCapture(self.video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video for iteration: {self.video_path}")
+
+        try:
+            current_video_pos = -1  # 记录当前视频指针位置（解码后）
+            for global_fid in self._indices:
+                # 若帧号不连续，需要 seek
+                if global_fid != current_video_pos + 1:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, global_fid)
+                ret, frame = cap.read()
+                current_video_pos = global_fid
+                if not ret:
+                    frame = np.zeros((self._frame_wh[1], self._frame_wh[0], 3), dtype=np.uint8)
+                yield frame
+        finally:
+            cap.release()
+
+    # ------------------------------------------------------------------
+    # 内部读帧工具
+    # ------------------------------------------------------------------
+
+    def _read_single(self, global_frame_idx: int) -> np.ndarray:
+        """打开视频，seek 到指定帧并读取。"""
+        cap = cv2.VideoCapture(self.video_path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, global_frame_idx)
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            h, w = self._frame_wh[1], self._frame_wh[0]
+            return np.zeros((h, w, 3), dtype=np.uint8)
+        return frame
+
+    def _read_batch(self, global_indices: "list[int]") -> np.ndarray:
+        """
+        顺序 seek 读取多帧，返回 (N, H, W, 3) uint8 ndarray。
+        对于已排好序的帧号会使用连续读取优化。
+        """
+        if not global_indices:
+            h, w = self._frame_wh[1], self._frame_wh[0]
+            return np.empty((0, h, w, 3), dtype=np.uint8)
+
+        cap = cv2.VideoCapture(self.video_path)
+        frames = []
+        prev = -2
+        for fid in global_indices:
+            if fid != prev + 1:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, fid)
+            ret, frame = cap.read()
+            if not ret:
+                h, w = self._frame_wh[1], self._frame_wh[0]
+                frame = np.zeros((h, w, 3), dtype=np.uint8)
+            frames.append(frame)
+            prev = fid
+        cap.release()
+        return np.stack(frames)
+
+    def __repr__(self):
+        return (
+            f"LazyVideoFrames(video='{self.video_path}', "
+            f"n_frames={len(self._indices)}, "
+            f"wh={self._frame_wh})"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 面片常量（与 demo.py 保持一致）
 # ---------------------------------------------------------------------------
 _FACES_NEW = np.array([
@@ -814,7 +999,8 @@ class HaWoRPipeline:
                 else:
                     do_flip = True
 
-                results = model.inference(img_ck, boxes_ck, img_focal=image_focal, img_center=img_center,
+                with torch.no_grad():
+                    results = model.inference(img_ck, boxes_ck, img_focal=image_focal, img_center=img_center,
                                           do_flip=do_flip)
 
                 data_out = {
@@ -881,66 +1067,27 @@ class HaWoRPipeline:
 
     def _extract_frames(self, video_path: str | Path, start_idx: int = 0, end_idx: int | None = -1, frame_step=1):
         """
-        从给定视频路径提取视频帧，返回images: numpy.array (BGR)
+        从给定视频路径构建懒加载帧序列，不一次性将所有帧读入内存。
+        返回 LazyVideoFrames 对象，支持 len()、随机索引、切片和迭代。
 
         Args:
-            video_path: 输入 mp4 路径
-            frame_step: 采样步长（1 = 每帧）
-            max_frames: 最大处理帧数（None 表示全部）
+            video_path : 输入 mp4 路径
+            start_idx  : 起始帧（包含）
+            end_idx    : 终止帧（不含）；-1 或 None 表示到末尾
+            frame_step : 采样步长（1 = 每帧）
         """
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            raise RuntimeError(f"Cannot open video: {video_path}")
-
-        images_BGR = []
-        frame_indices = []
-        frame_idx = 0
-        collected = 0
-        try:
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        except Exception:
-            total_frames = 0
-        if not end_idx or end_idx == -1:
-            end_idx = total_frames
-
-        if self.verbose:
-            print(f"Reading frames from video {video_path} (total frames ~{total_frames})")
-
-        # Collect frames according to frame_step and max_frames
-        # Collect frames according to frame_step and max_frames, show progress
-        with tqdm(total=total_frames if total_frames > 0 else None,
-                  desc=f"Reading {video_path}", unit='frame') as pbar:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                pbar.update(1)
-
-                if frame_idx % frame_step == 0:
-                    # # Convert BGR -> RGB # 不要自动执行这一步！后面的YOLO模型会有问题
-                    # img_rgb = frame[:, :, ::-1]
-                    # images.append(img_rgb)
-                    images_BGR.append(frame)
-                    frame_indices.append(frame_idx)
-                    collected += 1
-
-                    if end_idx is not None and collected >= end_idx:
-                        break
-
-                frame_idx += 1
-
-        cap.release()
-
-        if len(images_BGR) == 0:
+        lazy = LazyVideoFrames(
+            video_path=str(video_path),
+            frame_step=frame_step,
+            start_idx=start_idx,
+            end_idx=end_idx if (end_idx and end_idx != -1) else None,
+        )
+        if len(lazy) == 0:
             print("No frames collected, exiting")
-            return
-
+            return lazy
         if self.verbose:
-            print(f"Collected {len(images_BGR)} frames, running batch reconstruction via recon.recon(images)")
-
-        images_BGR = np.stack(images_BGR)  # 这边会进行连续储存，但是会copy操作，从list转过来。可能有时间和内存消耗。
-        return images_BGR
+            print(f"LazyVideoFrames ready: {lazy}")
+        return lazy
 
     def _image_stream(self, images_BGR, calib, stride, max_frame=None):
         """ Image generator for DROID """
@@ -1409,10 +1556,11 @@ class HaWoRPipeline:
             overall_pb.update(1)  # infiller accounted for
 
         # ── Step 5: 抖动检测与平滑 ────────────────────────────────────────
+        pred_trans_smooth, pred_rot_smooth, pred_hand_pose_smooth = (None, None, None)
         if self.smooth_hands:
             if self.verbose:
                 print("[HaWoR] Step 5a — Smoothing hand predictions (MAD jitter detection + Gaussian)")
-            pred_trans, pred_rot, pred_hand_pose = smooth_hand_predictions(
+            pred_trans_smooth, pred_rot_smooth, pred_hand_pose_smooth = smooth_hand_predictions(
                 pred_trans, pred_rot, pred_hand_pose, pred_valid,
                 jitter_thresh_k=self.jitter_thresh_k_hands,
                 smooth_sigma_trans=self.smooth_sigma_trans,
@@ -1421,17 +1569,18 @@ class HaWoRPipeline:
                 verbose=self.verbose,
             )
 
+        R_c2w_sla_all_smooth, t_c2w_sla_all_smooth, R_w2c_sla_all_smooth, t_w2c_sla_all_smooth = (None, None, None, None)
         if self.smooth_camera:
             if self.verbose:
                 print("[HaWoR] Step 5b — Smoothing camera trajectory (MAD jitter detection + Gaussian)")
-            R_c2w_sla_all, t_c2w_sla_all = smooth_camera_trajectory(
+            R_c2w_sla_all_smooth, t_c2w_sla_all_smooth = smooth_camera_trajectory(
                 R_c2w_sla_all, t_c2w_sla_all,
                 jitter_thresh_k=self.jitter_thresh_k_cam,
                 smooth_sigma=self.smooth_sigma_cam,
                 verbose=self.verbose,
             )
-            R_w2c_sla_all = R_c2w_sla_all.transpose(-1, -2)
-            t_w2c_sla_all = -torch.einsum("bij,bj->bi", R_w2c_sla_all, t_c2w_sla_all)
+            R_w2c_sla_all_smooth = R_c2w_sla_all_smooth.transpose(-1, -2)
+            t_w2c_sla_all_smooth = -torch.einsum("bij,bj->bi", R_w2c_sla_all_smooth, t_c2w_sla_all_smooth)
 
         # Update overall progress after smoothing stage if enabled
         if overall_pb is not None:
@@ -1449,6 +1598,13 @@ class HaWoRPipeline:
             pred_trans, pred_rot, pred_hand_pose, pred_betas,
             vis_start, vis_end, faces_right, faces_left
         )
+        right_dict_smooth, left_dict_smooth = (None, None)
+        if self.smooth_hands:
+            right_dict_smooth, left_dict_smooth = _build_hand_dicts(
+                pred_trans_smooth, pred_rot_smooth, pred_hand_pose_smooth, pred_betas,
+                vis_start, vis_end, faces_right, faces_left
+            )
+            
 
         # ── 坐标系变换 ───────────────────────────────────────────────────
         (right_dict, left_dict,
@@ -1456,6 +1612,18 @@ class HaWoRPipeline:
          R_c2w_sla_all, t_c2w_sla_all) = _apply_coord_transform(
             right_dict, left_dict, R_c2w_sla_all, t_c2w_sla_all
         )
+         
+        if self.smooth_hands or self.smooth_camera:
+            if not self.smooth_hands:
+                right_dict_smooth, left_dict_smooth = right_dict.copy(), left_dict.copy()
+            if not self.smooth_camera:
+                R_c2w_sla_all_smooth, t_c2w_sla_all_smooth = R_c2w_sla_all.clone(), t_c2w_sla_all.clone()
+                R_w2c_sla_all_smooth, t_w2c_sla_all_smooth = R_w2c_sla_all.clone(), t_w2c_sla_all.clone()
+            (right_dict_smooth, left_dict_smooth,
+            R_w2c_sla_all_smooth, t_w2c_sla_all_smooth,
+            R_c2w_sla_all_smooth, t_c2w_sla_all_smooth) = _apply_coord_transform(
+                right_dict_smooth, left_dict_smooth, R_c2w_sla_all_smooth, t_c2w_sla_all_smooth
+            )
 
         # ── 整理返回结果 ─────────────────────────────────────────────────
         result = dict(
@@ -1472,7 +1640,28 @@ class HaWoRPipeline:
             t_w2c=t_w2c_sla_all,
             img_focal=image_focal,
             rendered_video=None,
-            seq_folder=None
+            seq_folder=None,
+            
+            smooth_hand_enabled=self.smooth_hands,
+            smooth_camera_enabled=self.smooth_camera,
+            
+            # 使用了smooth的结果
+            smoothed_result = dict(
+                pred_trans=pred_trans_smooth,
+                pred_rot=pred_rot_smooth,
+                pred_hand_pose=pred_hand_pose_smooth,
+                pred_betas=pred_betas,
+                pred_valid=pred_valid,
+                right_dict=right_dict_smooth,
+                left_dict=left_dict_smooth,
+                R_c2w=R_c2w_sla_all_smooth,
+                t_c2w=t_c2w_sla_all_smooth,
+                R_w2c=R_w2c_sla_all_smooth,
+                t_w2c=t_w2c_sla_all_smooth,
+                img_focal=image_focal,
+                rendered_video=None,
+                seq_folder=None,
+            ),
         )
 
         # ── 可选：渲染 mp4 ───────────────────────────────────────────────
@@ -1510,8 +1699,9 @@ class HaWoRPipeline:
             else:
                 _ = extract_frames(file, img_folder)
             imgfiles = natsorted(glob(f'{img_folder}/*.jpg'))
+            result_render = result['smoothed_result'] if self.smooth_hands or self.smooth_camera else result
             rendered_video = self._render(
-                result=result,
+                result=result_render,
                 imgfiles=imgfiles,
                 vis_start=vis_start,
                 vis_end=vis_end,

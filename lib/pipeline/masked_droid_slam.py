@@ -12,7 +12,14 @@ import cv2
 from glob import glob
 
 from droid import Droid
-from torch.multiprocessing import Process
+import multiprocessing as _mp
+try:
+    # 仅在未设置启动方法时尝试设置为 spawn，避免重复设置导致 RuntimeError
+    if _mp.get_start_method(allow_none=True) is None:
+        torch.multiprocessing.set_start_method('spawn')
+except Exception:
+    # 已经设置或不能设置时忽略（避免在子进程导入时抛出）
+    pass
 
 import evo
 from evo.core.trajectory import PoseTrajectory3D
