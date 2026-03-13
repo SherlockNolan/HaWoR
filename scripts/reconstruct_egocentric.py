@@ -17,8 +17,17 @@ import contextlib
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.pipeline.HaWoRPipeline import HaWoRPipeline, HaWoRConfig
- from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints
-# --- Default Configuration ---
+from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints
+
+"""
+python scripts/reconstruct_egocentric.py --video-path=\
+"/inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/ziyu/DATASET/Rhos_VR_EgoHands/align_blocks/recording_2026-01-13T12-13-48_remote_0.mp4" \
+--output="results/" \
+--start=0 --end=1 --no-interleave --num-workers=1
+"""
+
+
+#--- Default Configuration ---
 DEFAULT_DATASET_ROOT = "/inspire/dataset/egocentric-10k/v20251211"
 DEFAULT_OUTPUT_ROOT = (
     "/inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/ziyu/DATASET/egocentric-10k-hawor"
@@ -202,7 +211,7 @@ def process_video_worker_proc(
                 result_dict = dict()
                 result_dict["original_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=False)
                 result_dict["smoothed_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=True)
-        # result_dict = _process_pipe.reconstruct(video_path, output_dir=pkl_dir)
+        # result_dict = _process_pipe.reconstruct(video_path, output_dir=pkl_dir) # 有完整输出信息的
         
         stop_monitoring.set()
         mon_thread.join()
@@ -245,7 +254,11 @@ def process_video_worker(video_path, pipe):
         os.makedirs(pkl_dir, exist_ok=True)
 
     try:
-        result_dict = pipe.reconstruct(video_path, output_dir=pkl_dir)
+        result_dict_origin = pipe.reconstruct(video_path, output_dir=pkl_dir)
+        result_dict = dict()
+        result_dict["original_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=False)
+        result_dict["smoothed_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=True)
+
         if result_dict:
             with open(pkl_path, "wb") as f:
                 pickle.dump(result_dict, f)
@@ -292,7 +305,7 @@ def check_single_pkl(pkl_path, verbose=True):
             print(f"Invalid structure: {pkl_path} is not a dict")
         return False
     # HaWoR result keys check
-    required_keys = ['pred_trans', 'pred_rot', 'pred_hand_pose', 'R_c2w', 't_c2w']
+    required_keys = ['original_result', 'smoothed_result']
     for k in required_keys:
         if k not in data:
             if verbose:
@@ -305,7 +318,7 @@ def check_pkl_files(video_list, verbose=True):
     # ... (code is identical)
     results = {}
     for video_path in tqdm(video_list, desc="Checking pkl files", unit="video"):
-        pkl_path = video_path.replace(".mp4", "_wilor.pkl")
+        pkl_path = video_path.replace(".mp4", "_hawor.pkl")
         pkl_path = pkl_path.replace(dataset_root, output_root)
         valid = check_single_pkl(pkl_path, verbose=verbose)
         results[pkl_path] = valid
@@ -357,7 +370,7 @@ def process_multi_workers(args, dtype, selected_vid_list):
             target=_worker_process_main,
             args=(wid, dev_str, dtype, task_queue, result_queue, init_queue),
             daemon=True,
-            name=f"WilorWorker-{wid}",
+            name=f"Worker-{wid}",
         )
         p.start()
         workers.append(p)
@@ -544,6 +557,12 @@ def main():
         help="Root directory of the dataset.",
     )
     parser.add_argument(
+        "--video-path",
+        type=str,
+        default=None,
+        help="Specific Video. 单视频处理逻辑，和整个数据集的优先遍历处理逻辑不同。",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=DEFAULT_OUTPUT_ROOT,
@@ -578,7 +597,7 @@ def main():
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=4,
+        default=1,
         help="Number of CPU processes to use for parallel processing. Use 1 for sequential execution.",
     )
 
@@ -591,32 +610,34 @@ def main():
     global dataset_root, output_root
     dataset_root = args.dataroot
     output_root = args.output
-        
+    
+    if args.video_path:
+        selected_vid_list = [args.video_path]
+    else:
+        all_vid_list = find_all_mp4_files(args.dataroot)
+        if args.interleave:
+            print("Applying factory/worker interleaving to video list...")
+            all_vid_list = reorder_videos_by_factory_worker(all_vid_list, args.dataroot)
+        if not all_vid_list:
+            print("No MP4 files found. Exiting.")
+            exit()
+        print(f"Total Videos: {len(all_vid_list)}")
 
-    all_vid_list = find_all_mp4_files(args.dataroot)
-    if args.interleave:
-        print("Applying factory/worker interleaving to video list...")
-        all_vid_list = reorder_videos_by_factory_worker(all_vid_list, args.dataroot)
-    if not all_vid_list:
-        print("No MP4 files found. Exiting.")
-        exit()
-    print(f"Total Videos: {len(all_vid_list)}")
+        if args.end is None:
+            args.end = len(all_vid_list)
+        selected_vid_list = all_vid_list[
+            args.start : args.end
+        ]  # todo: 重新处理排序逻辑，使得每个factory的worker的视频首先被遍历一次
+        print(f"Process: {len(selected_vid_list)}")
+        print("Selected Videos:")
+        print(selected_vid_list[:10])
 
-    if args.end is None:
-        args.end = len(all_vid_list)
-    selected_vid_list = all_vid_list[
-        args.start : args.end
-    ]  # todo: 重新处理排序逻辑，使得每个factory的worker的视频首先被遍历一次
-    print(f"Process: {len(selected_vid_list)}")
-    print("Selected Videos:")
-    print(selected_vid_list[:10])
-
-    if not selected_vid_list:
-        print("No videos selected based on start/end indices. Exiting.")
-        exit()
-    print(
-        f"Selected {len(selected_vid_list)} videos for processing (indices from {args.start} to {args.end})."
-    )
+        if not selected_vid_list:
+            print("No videos selected based on start/end indices. Exiting.")
+            exit()
+        print(
+            f"Selected {len(selected_vid_list)} videos for processing (indices from {args.start} to {args.end})."
+        )
 
     if args.check:
         print("Running in check-only mode.")

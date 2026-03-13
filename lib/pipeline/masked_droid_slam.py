@@ -60,7 +60,7 @@ args = parser.parse_args([])
 args.stereo = False
 args.upsample = True
 args.disable_vis = True
-torch.multiprocessing.set_start_method('spawn')
+# torch.multiprocessing.set_start_method('spawn') # 已经在外部调用多进程的时候设置过
 
 
 def est_calib(imagedir):
