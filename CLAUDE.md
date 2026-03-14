@@ -19,9 +19,11 @@ HaWoR (World-Space Hand Motion Reconstruction from Egocentric Videos) is a CVPR 
 意图：使用当前的HaWoRPipeline对数据集进行处理，生成3dKeypoints用于后面的VLA大模型的预训练。之前主要编辑的文件为：
 
 - `scripts/`文件夹下面的脚本
-- `lib/pipeline`下面的`HaWoRPipeline.py`等。
+- `lib/pipeline`下面的 `HaWoRPipeline.py`等。
 
 编写代码时提供必要的注释，遵守良好的设计模式原则。
+
+思考可用英文。最后的总结回答推荐使用中文。
 
 ## Installation
 
@@ -60,7 +62,6 @@ python scripts/reconstruct_egocentric.py --test --num-workers 4
 - Custom multiprocessing implementation for GPU assignment
 - Progress tracking with real-time updates per worker
 - Interleaved video processing for balanced factory/worker distribution
-
 
 ### Data Flow
 
