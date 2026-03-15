@@ -23,7 +23,7 @@ from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints
 python scripts/reconstruct_egocentric.py --video-path=\
 "/inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/ziyu/DATASET/Rhos_VR_EgoHands/align_blocks/recording_2026-01-13T12-13-48_remote_0.mp4" \
 --output="results/" \
---start=0 --end=1 --no-interleave --num-workers=1
+--start=0 --end=1 --no-interleave --num-workers=1 --save-origin
 """
 
 
@@ -38,7 +38,7 @@ DEFAULT_OUTPUT_ROOT_TEST = (
 )
 dataset_root: str # 全局引用，后面被参数更新
 output_root: str
-
+save_origin: bool
 
 def find_all_mp4_files(root_dir: str) -> list[str]:
     """Scans a directory recursively for all .mp4 files."""
@@ -262,6 +262,9 @@ def process_video_worker(video_path, pipe):
         if result_dict:
             with open(pkl_path, "wb") as f:
                 pickle.dump(result_dict, f)
+            if save_origin:
+                with open(pkl_path.replace(".pkl", "_origin_dict.pkl"), "wb") as f:
+                    pickle.dump(result_dict_origin, f)
             return f"Success: {os.path.basename(video_path)}"
         else:
             return f"Warning (no data): {os.path.basename(video_path)}"
@@ -588,6 +591,11 @@ def main():
         help="Using test video.",
     )
     parser.add_argument(
+        "--save-origin",
+        action="store_true",
+        help="同时保存一份原始的hawor的结果dict.",
+    )
+    parser.add_argument(
         "--no-interleave",
         action="store_false",
         dest="interleave",
@@ -607,9 +615,10 @@ def main():
         args.dataroot = DEFAULT_DATASET_ROOT_TEST
         args.output = DEFAULT_OUTPUT_ROOT_TEST
     
-    global dataset_root, output_root
+    global dataset_root, output_root, save_origin
     dataset_root = args.dataroot
     output_root = args.output
+    save_origin = args.save_origin
     
     if args.video_path:
         selected_vid_list = [args.video_path]

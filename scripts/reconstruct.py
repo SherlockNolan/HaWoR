@@ -16,8 +16,8 @@ reconstruct.py
 注意由于服务器没有显示器，而渲染依赖于显示器（受制于python包aitviewer），如果要渲染必须如下调整
 export MGLW_WINDOW=moderngl_window.context.headless.Window
 export PYOPENGL_PLATFORM=egl
-xvfb-run -a python reconstruct.py --video_path example/factory001_worker001_00000.mp4 --output_dir ./results --rendering --vis_mode cam
-xvfb-run -a python reconstruct.py --video_path example/video_0.mp4 --output_dir ./results --rendering --vis_mode cam
+xvfb-run -a python scripts/reconstruct.py --video_path example/factory001_worker001_00000.mp4 --output_dir ./results --rendering --vis_mode cam
+xvfb-run -a python scripts/reconstruct.py --video_path /inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/ziyu/DATASET/Rhos_VR_EgoHands/align_blocks/recording_2026-01-13T12-13-48_remote_0.mp4 --output_dir ./results --rendering --vis_mode cam
 
 """
 import argparse
