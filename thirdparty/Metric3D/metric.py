@@ -47,13 +47,15 @@ class Metric3D:
         self,
         checkpoint: Union[str, Path] = './weights/metric_depth_vit_large_800k.pth',
         model_name: str = 'v2-L',
+        device: str = "cuda"
     ) -> None:
         checkpoint = Path(checkpoint).resolve()
         cfg:Config = self._load_config_(model_name, checkpoint)
         # build model
         model = get_configured_monodepth_model(cfg, )
-        model = torch.nn.DataParallel(model).cuda()
+        # model = torch.nn.DataParallel(model).cuda()
         model, _, _, _ = load_ckpt(cfg.load_from, model, strict_match=False)
+        model = model.to(device)
         model.eval()
         # save to self
         self.cfg_ = cfg

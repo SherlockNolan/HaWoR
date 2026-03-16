@@ -671,6 +671,7 @@ class HaWoRConfig:
         infiller_weight   : Infiller 模型权重路径。
         metric_3D_path    : Metric3D 权重路径。
         detector_path     : 手部检测器（YOLO）权重路径。
+        device            : 运行设备（"cuda"、"cpu" 或具体 GPU）。
 
     运行配置
         verbose           : 是否打印详细日志。
@@ -691,6 +692,7 @@ class HaWoRConfig:
     infiller_weight: str = "./weights/hawor/checkpoints/infiller.pt"
     metric_3D_path: str = "thirdparty/Metric3D/weights/metric_depth_vit_large_800k.pth"
     detector_path: str = "./weights/external/detector.pt"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"  # "cuda" 或 "cpu" 或者自定义哪个具体的GPU
 
     # ── 运行配置 ─────────────────────────────────────────────────────
     verbose: bool = False
@@ -734,14 +736,15 @@ class HaWoRPipeline:
         self.checkpoint = cfg.checkpoint
         self.infiller_weight = cfg.infiller_weight
         self.verbose = cfg.verbose
+        self.device = cfg.device
+        
 
         # ── 加载模型 ───────────────────────────────────────────────────
-        self.model, self.model_cfg = self._load_hawor(self.checkpoint)
-        self.hand_detect_model = YOLO(cfg.detector_path)
-        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         print(f"[INIT] HaWoRPipeline Using device: {self.device}")
-        self.model = self.model.to(self.device)
-        self.metric = Metric3D(cfg.metric_3D_path)
+        self.model, self.model_cfg = self._load_hawor(self.checkpoint, self.device)
+        self.hand_detect_model = YOLO(cfg.detector_path)
+        self.hand_detect_model = self.hand_detect_model.to(self.device)
+        self.metric = Metric3D(cfg.metric_3D_path, device=self.device)
 
         # ── DROID-SLAM 参数 ────────────────────────────────────────────
         import types
@@ -782,7 +785,7 @@ class HaWoRPipeline:
         if self.verbose:
             print(f"[INIT] Loading infiller model from {self.infiller_weight}...")
         weight_path = self.infiller_weight
-        ckpt = torch.load(weight_path, map_location=self.device)
+        ckpt = torch.load(weight_path, map_location="cpu")
         pos_dim = 3
         shape_dim = 10
         num_joints = 15
@@ -794,6 +797,7 @@ class HaWoRPipeline:
                                          nlayers=8, dropout=0.05, out_dim=repr_dim, masked_attention_stage=True)
         filling_model.to(self.device)
         filling_model.load_state_dict(ckpt['transformer_encoder_state_dict'])
+        filling_model = filling_model.to(self.device)
         filling_model.eval()
         return filling_model
 
@@ -864,7 +868,7 @@ class HaWoRPipeline:
 
         return boxes, tracks
 
-    def _load_hawor(self, checkpoint_path):
+    def _load_hawor(self, checkpoint_path, device):
         from pathlib import Path
         from hawor.configs import get_config
         model_cfg = str(Path(checkpoint_path).parent.parent / 'model_config.yaml')
@@ -877,7 +881,8 @@ class HaWoRPipeline:
             model_cfg.MODEL.BBOX_SHAPE = [192, 256]
             model_cfg.freeze()
 
-        model = HAWOR.load_from_checkpoint(checkpoint_path, strict=False, cfg=model_cfg)
+        model = HAWOR.load_from_checkpoint(checkpoint_path, strict=False, cfg=model_cfg, map_location="cpu") # fix: 避免并行化初始化的时候开销过大
+        model = model.to(device)
         return model, model_cfg
 
     def _hawor_motion_estimation(self, images_BGR, image_focal, tracks_np):
@@ -1001,7 +1006,7 @@ class HaWoRPipeline:
 
                 with torch.no_grad():
                     results = model.inference(img_ck, boxes_ck, img_focal=image_focal, img_center=img_center,
-                                          do_flip=do_flip)
+                                          device=self.device, do_flip=do_flip)
 
                 data_out = {
                     "init_root_orient": results["pred_rotmat"][None, :, 0],  # (B, T, 3, 3)
@@ -1047,16 +1052,16 @@ class HaWoRPipeline:
                 vertices = outputs["vertices"][0].cpu()  # (T, N, 3)
                 for img_i, _ in enumerate(img_ck):
                     if do_flip:
-                        faces = torch.from_numpy(faces_left).cuda()
+                        faces = torch.from_numpy(faces_left).to(self.device)
                     else:
-                        faces = torch.from_numpy(faces_right).cuda()
-                    cam_R = torch.eye(3).unsqueeze(0).cuda()
-                    cam_T = torch.zeros(1, 3).cuda()
+                        faces = torch.from_numpy(faces_right).to(self.device)
+                    cam_R = torch.eye(3).unsqueeze(0).to(self.device)
+                    cam_T = torch.zeros(1, 3).to(self.device)
                     cameras, lights = renderer.create_camera_from_cv(cam_R, cam_T)
                     verts_color = torch.tensor([0, 0, 255, 255]) / 255
                     vertices_i = vertices[[img_i]]
-                    rend, mask = renderer.render_multiple(vertices_i.unsqueeze(0).cuda(), faces,
-                                                          verts_color.unsqueeze(0).cuda(), cameras, lights)
+                    rend, mask = renderer.render_multiple(vertices_i.unsqueeze(0).to(self.device), faces,
+                                                          verts_color.unsqueeze(0).to(self.device), cameras, lights)
 
                     model_masks[frame_ck[img_i]] += mask
 

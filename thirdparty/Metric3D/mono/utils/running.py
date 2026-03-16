@@ -18,7 +18,11 @@ def load_ckpt(load_path, model, optimizer=None, scheduler=None, strict_match=Tru
             logger.info(f"Loading weight '{load_path}'")
         checkpoint = torch.load(load_path, map_location="cpu")
         ckpt_state_dict  = checkpoint['model_state_dict']
-        model.module.load_state_dict(ckpt_state_dict, strict=strict_match)
+        if hasattr(model, 'module'):
+            model.module.load_state_dict(ckpt_state_dict, strict=strict_match)
+        else:
+            model.load_state_dict(ckpt_state_dict, strict=strict_match)
+        # model.module.load_state_dict(ckpt_state_dict, strict=strict_match)
 
         if optimizer is not None:
             optimizer.load_state_dict(checkpoint['optimizer'])

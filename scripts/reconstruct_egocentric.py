@@ -29,6 +29,13 @@ python scripts/reconstruct_egocentric.py --video-path=\
 python scripts/reconstruct_egocentric.py \
     --output="results/" \
     --num-workers=4 --test
+    
+python scripts/reconstruct_egocentric.py \
+    --start=0 --end=50000 \
+    --num-workers=50
+python scripts/reconstruct_egocentric.py \
+    --start=100000 --end=200000 \
+    --num-workers=100
 """
 
 
@@ -165,7 +172,7 @@ def _worker_process_main(
     print(f"[Worker {worker_id} / PID {pid}] 初始化 pipeline 在 {device}", flush=True)
     
     # 使用 HaWoRPipeline
-    cfg = HaWoRConfig(verbose=False)
+    cfg = HaWoRConfig(verbose=False, device=device_str)
     _process_pipe = HaWoRPipeline(cfg)
     
     # 通知主进程：本 Worker 初始化完成
@@ -247,7 +254,7 @@ def process_video_worker_proc(
 
         
         with _suppress_all_output(enabled=True):
-                result_dict_origin = _process_pipe.reconstruct(video_path, output_dir=pkl_dir) # 屏蔽原有输出
+                result_dict_origin = _process_pipe.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031) # 屏蔽原有输出
                 result_dict = dict()
                 result_dict["original_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=False)
                 result_dict["smoothed_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=True)
@@ -303,7 +310,7 @@ def process_video_worker(video_path, pipe, extra_args=None):
 
     try:
         with _suppress_all_output(enabled=True):
-            result_dict_origin = pipe.reconstruct(video_path, output_dir=pkl_dir)
+            result_dict_origin = pipe.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031)
             result_dict = dict()
             result_dict["original_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=False)
             result_dict["smoothed_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=True)
