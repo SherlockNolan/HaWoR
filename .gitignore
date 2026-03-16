@@ -5,6 +5,7 @@
 /weights
 /app_pytorch3d*
 /test_video/
+/test_results
 .vscode/
 **/.DS_Store
 data/pretrain/*.pth

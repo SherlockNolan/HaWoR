@@ -24,6 +24,11 @@ python scripts/reconstruct_egocentric.py --video-path=\
 "/inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/ziyu/DATASET/Rhos_VR_EgoHands/align_blocks/recording_2026-01-13T12-13-48_remote_0.mp4" \
 --output="results/" \
 --start=0 --end=1 --no-interleave --num-workers=1 --save-origin
+
+
+python scripts/reconstruct_egocentric.py \
+    --output="results/" \
+    --num-workers=4 --test
 """
 
 
@@ -36,9 +41,9 @@ DEFAULT_DATASET_ROOT_TEST = "./test_video"
 DEFAULT_OUTPUT_ROOT_TEST = (
     "./test_results"
 )
-dataset_root: str # 全局引用，后面被参数更新
-output_root: str
-save_origin: bool
+
+# 用于传递额外参数的 dict，替代全局变量
+
 
 def find_all_mp4_files(root_dir: str) -> list[str]:
     """Scans a directory recursively for all .mp4 files."""
@@ -117,6 +122,27 @@ _process_pipe = None
 _process_device = None
 _process_dtype = None
 
+
+@contextlib.contextmanager
+def _suppress_all_output(enabled=True):
+    if not enabled:
+        yield
+        return
+
+    with open(os.devnull, "w") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            saved_stdout_fd = os.dup(1)
+            saved_stderr_fd = os.dup(2)
+            try:
+                os.dup2(devnull.fileno(), 1)
+                os.dup2(devnull.fileno(), 2)
+                yield
+            finally:
+                os.dup2(saved_stdout_fd, 1)
+                os.dup2(saved_stderr_fd, 2)
+                os.close(saved_stdout_fd)
+                os.close(saved_stderr_fd)
+
 def _worker_process_main(
     worker_id: int, device_str: str, dtype, task_queue, result_queue, init_queue
 ):
@@ -129,7 +155,7 @@ def _worker_process_main(
         worker_id:    进程编号（用于日志）
         device_str:   分配给此进程的 GPU，如 "cuda:0"
         dtype:        模型推理精度
-        task_queue:   任务队列，每项为 (video_path, video_idx, progress_queue) 或 None（哨兵值）
+        task_queue:   任务队列，每项为 (video_path, video_idx, progress_queue, extra_args) 或 None（哨兵值）
         result_queue: 结果队列，每项为 (video_idx, status, message)
         init_queue:   初始化完成后上报 worker_id，主进程用于显示初始化进度
     """
@@ -150,9 +176,15 @@ def _worker_process_main(
         task = task_queue.get()
         if task is None:  # 哨兵值，退出
             break
-        video_path, video_idx, progress_queue = task
+        video_path, video_idx, progress_queue, extra_args = task
         try:
-            msg = process_video_worker_proc(video_path, video_idx, progress_queue, worker_id)
+            msg = process_video_worker_proc(
+                video_path,
+                video_idx,
+                progress_queue,
+                worker_id,
+                extra_args=extra_args,
+            )
             result_queue.put((video_idx, "ok", msg))
         except Exception as e:
             # 捕获所有异常，记录后继续处理下一个任务，进程不退出
@@ -167,6 +199,7 @@ def process_video_worker_proc(
     video_idx,
     progress_queue,
     worker_id=0,
+    extra_args=None,
 ):
     """Worker function for use in ProcessPoolExecutor.
 
@@ -174,6 +207,11 @@ def process_video_worker_proc(
     此处直接使用，不再重复创建，彻底绕开 GIL。
     """
     global _process_pipe
+    if extra_args is None:
+        extra_args = {}
+    dataset_root = extra_args.get("dataset_root", "")
+    output_root = extra_args.get("output_root", "")
+    save_origin = extra_args.get("save_origin", False)
     pkl_path = video_path.replace(".mp4", "_hawor.pkl")
     pkl_path = pkl_path.replace(dataset_root, output_root)
     pkl_dir = os.path.dirname(pkl_path)
@@ -186,6 +224,9 @@ def process_video_worker_proc(
 
     success = False
     try:
+        if _process_pipe is None:
+            raise RuntimeError("Worker pipeline 未初始化。")
+
         # 启动进度监听线程（针对 HaWoR 的百分比进度）
         stop_monitoring = threading.Event()
         def monitor_progress():
@@ -205,8 +246,7 @@ def process_video_worker_proc(
              progress_queue.put(("init", video_idx, 1.0, worker_id, os.path.basename(video_path)))
 
         
-        with open(os.devnull, "w") as devnull:
-            with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+        with _suppress_all_output(enabled=True):
                 result_dict_origin = _process_pipe.reconstruct(video_path, output_dir=pkl_dir) # 屏蔽原有输出
                 result_dict = dict()
                 result_dict["original_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=False)
@@ -219,6 +259,9 @@ def process_video_worker_proc(
         if result_dict:
             with open(pkl_path, "wb") as f:
                 pickle.dump(result_dict, f)
+            if save_origin:
+                with open(pkl_path.replace(".pkl", "_origin_dict.pkl"), "wb") as f:
+                    pickle.dump(result_dict_origin, f)
             success = True
             return f"Success: {os.path.basename(video_path)}"
         else:
@@ -240,11 +283,16 @@ def process_video_worker_proc(
             progress_queue.put(("done", video_idx, 1.0, worker_id))
 
 
-def process_video_worker(video_path, pipe):
+def process_video_worker(video_path, pipe, extra_args=None):
     """
     A worker function that handles processing and saving for a single video.
     Designed to be called from a ProcessPoolExecutor.
     """
+    if extra_args is None:
+        extra_args = {}
+    dataset_root = extra_args.get("dataset_root", "")
+    output_root = extra_args.get("output_root", "")
+    save_origin = extra_args.get("save_origin", False)
     pkl_path = video_path.replace(".mp4", "_hawor.pkl")
     pkl_path = pkl_path.replace(dataset_root, output_root)
     pkl_dir = os.path.dirname(pkl_path)
@@ -254,10 +302,11 @@ def process_video_worker(video_path, pipe):
         os.makedirs(pkl_dir, exist_ok=True)
 
     try:
-        result_dict_origin = pipe.reconstruct(video_path, output_dir=pkl_dir)
-        result_dict = dict()
-        result_dict["original_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=False)
-        result_dict["smoothed_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=True)
+        with _suppress_all_output(enabled=True):
+            result_dict_origin = pipe.reconstruct(video_path, output_dir=pkl_dir)
+            result_dict = dict()
+            result_dict["original_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=False)
+            result_dict["smoothed_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=True)
 
         if result_dict:
             with open(pkl_path, "wb") as f:
@@ -317,9 +366,13 @@ def check_single_pkl(pkl_path, verbose=True):
     return True
 
 
-def check_pkl_files(video_list, verbose=True):
+def check_pkl_files(video_list, verbose=True, extra_args=None):
     # ... (code is identical)
     results = {}
+    if extra_args is None:
+        extra_args = {}
+    dataset_root = extra_args.get("dataset_root", "")
+    output_root = extra_args.get("output_root", "")
     for video_path in tqdm(video_list, desc="Checking pkl files", unit="video"):
         pkl_path = video_path.replace(".mp4", "_hawor.pkl")
         pkl_path = pkl_path.replace(dataset_root, output_root)
@@ -341,7 +394,9 @@ def print_summary(results):
     print(f"Valid files: {valid_count}")
     print(f"Invalid files: {len(invalid_files)}")
 
-def process_multi_workers(args, dtype, selected_vid_list):
+def process_multi_workers(args, dtype, selected_vid_list, extra_args=None):
+    if extra_args is None:
+        extra_args = {}
     # 检测所有可用 GPU，按进程数轮询分配
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
@@ -406,7 +461,7 @@ def process_multi_workers(args, dtype, selected_vid_list):
 
     # 向任务队列投递所有视频任务
     for idx, video_path in enumerate(selected_vid_list):
-        task_queue.put((video_path, idx, progress_queue))
+        task_queue.put((video_path, idx, progress_queue, extra_args))
     # 投递哨兵值，每个进程收到后退出
     for _ in workers:
         task_queue.put(None)
@@ -445,7 +500,8 @@ def process_multi_workers(args, dtype, selected_vid_list):
             # 对于 HaWoR，payload 约定为 1.0 (表示 100%)
             bar.total = 100
             bar.n = 0
-            bar.set_description(f"W{wid} {video_name[:28]}")
+            desc_name = video_name[:28] if video_name is not None else "[idle]"
+            bar.set_description(f"W{wid} {desc_name}")
             bar.refresh()
         elif msg_type == "progress":
             # payload 是 0-1 的浮点数
@@ -615,11 +671,14 @@ def main():
         args.dataroot = DEFAULT_DATASET_ROOT_TEST
         args.output = DEFAULT_OUTPUT_ROOT_TEST
     
-    global dataset_root, output_root, save_origin
-    dataset_root = args.dataroot
-    output_root = args.output
-    save_origin = args.save_origin
+
+    extra_args = {
+        "dataset_root": args.dataroot,
+        "output_root": args.output,
+        "save_origin": args.save_origin,
+    }
     
+
     if args.video_path:
         selected_vid_list = [args.video_path]
     else:
@@ -650,7 +709,7 @@ def main():
 
     if args.check:
         print("Running in check-only mode.")
-        results = check_pkl_files(selected_vid_list, verbose=True)
+        results = check_pkl_files(selected_vid_list, verbose=True, extra_args=extra_args)
         print_summary(results)
         exit()
 
@@ -660,18 +719,20 @@ def main():
     dtype = torch.float16
     print("Running in detection mode.")
     # If num_workers <= 1, keep sequential processing to preserve original behaviour.
+
     if args.num_workers <= 1:
         cfg = HaWoRConfig(verbose=False)
         pipe = HaWoRPipeline(cfg)
         for video_path in tqdm(
             selected_vid_list, desc="Processing videos", unit="video"
         ):
-            print(process_video_worker(video_path, pipe))
+            print(process_video_worker(video_path, pipe, extra_args=extra_args))
     else:
-        process_multi_workers(args, dtype, selected_vid_list)
+        # 需要在多进程相关函数中传递 extra_args
+        process_multi_workers(args, dtype, selected_vid_list, extra_args=extra_args)
 
     print("\n--- Detection complete. Now checking generated PKL files ---")
-    results = check_pkl_files(selected_vid_list, verbose=True)
+    results = check_pkl_files(selected_vid_list, verbose=True, extra_args=extra_args)
     print_summary(results)
 
 # --- Main Execution Block ---
