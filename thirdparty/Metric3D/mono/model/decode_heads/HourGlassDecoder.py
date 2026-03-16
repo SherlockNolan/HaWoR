@@ -209,7 +209,9 @@ class HourglassDecoder(nn.Module):
         )
     
     def get_bins(self, bins_num):
-        depth_bins_vec = torch.linspace(math.log(self.min_val), math.log(self.max_val), bins_num, device='cuda')
+        # 使用模型参数所在设备，避免多GPU时硬编码 "cuda" 导致设备不匹配
+        device = next(self.parameters()).device
+        depth_bins_vec = torch.linspace(math.log(self.min_val), math.log(self.max_val), bins_num, device=device)
         depth_bins_vec = torch.exp(depth_bins_vec)
         return depth_bins_vec
     
@@ -258,7 +260,7 @@ class HourglassDecoder(nn.Module):
 
         B, _, H, W = depth_pred_2.shape
 
-        meshgrid = self.create_mesh_grid(H, W, B)
+        meshgrid = self.create_mesh_grid(H, W, B, device=depth_pred_2.device)
 
         depth_pred_mono = self.upsample(depth_pred_2, scale_factor=4) + 1e-1 * \
             self.conv_up_2(

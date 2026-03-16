@@ -42,6 +42,7 @@ def calculate_radius(mask):
 class Metric3D:
     cfg_: Config
     model_: torch.nn.Module
+    device_: str  # 存储设备信息
 
     def __init__(
         self,
@@ -60,6 +61,7 @@ class Metric3D:
         # save to self
         self.cfg_ = cfg
         self.model_ = model
+        self.device_ = device  # 保存设备，用于推理时移动输入张量
 
     @torch.no_grad()
     def __call__(
@@ -100,6 +102,9 @@ class Metric3D:
         # transform image
         rgb_input, cam_models_stacks, pad, label_scale_factor = \
             transform_test_data_scalecano(rgb_image, intrinsic, self.cfg_.data_basic)
+        # 将输入张量移动到模型所在设备（避免多GPU时设备不匹配）
+        rgb_input = rgb_input.to(self.device_)
+        cam_models_stacks = [c.to(self.device_) for c in cam_models_stacks]
         # predict depth
         normalize_scale = self.cfg_.data_basic.depth_range[1]
         rgb_input = rgb_input.unsqueeze(0)

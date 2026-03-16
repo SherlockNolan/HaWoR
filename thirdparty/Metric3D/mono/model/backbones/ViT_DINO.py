@@ -1148,7 +1148,9 @@ class DinoWindowVisionTransformer(nn.Module):
         
         nh, nw = shape
         radius = (window_size-1)//2 
-        mask_ori = AP.local_2d_pattern(nh, nw, distance = radius + 0.1, p=torch.inf).cuda()
+        # 使用模型参数所在设备，避免多GPU时硬编码 .cuda() 导致设备不匹配
+        _device = next(self.parameters()).device
+        mask_ori = AP.local_2d_pattern(nh, nw, distance = radius + 0.1, p=torch.inf).to(_device)
         
         pad = (8 - (nh * nw) % 8)
         if pad == 8:

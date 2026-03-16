@@ -152,7 +152,9 @@ def get_prediction(
         input=input,
         cam_model=cam_model,
     )
-    pred_depth, confidence, output_dict = model.module.inference(data)
+    # 兼容 DataParallel 和非 DataParallel 模型
+    actual_model = model.module if hasattr(model, 'module') else model
+    pred_depth, confidence, output_dict = actual_model.inference(data)
 
     return pred_depth, output_dict
 
