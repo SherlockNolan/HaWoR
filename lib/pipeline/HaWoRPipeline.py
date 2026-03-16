@@ -41,6 +41,7 @@ import joblib
 from scripts.scripts_test_video.hawor_video import hawor_infiller_plain, hawor_infiller
 from lib.pipeline.tools import parse_chunks
 from lib.models.hawor import HAWOR
+from lib.models.mano_wrapper import MANO
 from lib.eval_utils.custom_utils import load_slam_cam, quaternion_to_matrix
 from lib.eval_utils.custom_utils import interpolate_bboxes
 from lib.eval_utils.custom_utils import cam2world_convert, load_slam_cam
@@ -277,53 +278,6 @@ _R_X = torch.tensor([
     [0, 0, -1],
 ], dtype=torch.float32)
 
-
-def _build_faces():
-    """构建右手 / 左手的 face 数组。"""
-    faces_base = get_mano_faces()
-    faces_right = np.concatenate([faces_base, _FACES_NEW], axis=0)
-    faces_left = faces_right[:, [0, 2, 1]]
-    return faces_right, faces_left
-
-
-def _build_hand_dicts(pred_trans, pred_rot, pred_hand_pose, pred_betas,
-                      vis_start, vis_end, faces_right, faces_left):
-    """
-    用 MANO 模型前向推理，得到双手的顶点字典。
-
-    返回 (right_dict, left_dict)，其中每个 dict 包含：
-        - 'vertices': (1, T, N, 3) Tensor
-        - 'faces': np.ndarray
-    """
-    hand2idx = {"right": 1, "left": 0}
-
-    # 右手
-    hi = hand2idx["right"]
-    pred_glob_r = run_mano(
-        pred_trans[hi:hi + 1, vis_start:vis_end],
-        pred_rot[hi:hi + 1, vis_start:vis_end],
-        pred_hand_pose[hi:hi + 1, vis_start:vis_end],
-        betas=pred_betas[hi:hi + 1, vis_start:vis_end],
-    )
-    right_dict = {
-        "vertices": pred_glob_r["vertices"][0].unsqueeze(0),  # (1, T, N, 3)
-        "faces": faces_right,
-    }
-
-    # 左手
-    hi = hand2idx["left"]
-    pred_glob_l = run_mano_left(
-        pred_trans[hi:hi + 1, vis_start:vis_end],
-        pred_rot[hi:hi + 1, vis_start:vis_end],
-        pred_hand_pose[hi:hi + 1, vis_start:vis_end],
-        betas=pred_betas[hi:hi + 1, vis_start:vis_end],
-    )
-    left_dict = {
-        "vertices": pred_glob_l["vertices"][0].unsqueeze(0),  # (1, T, N, 3)
-        "faces": faces_left,
-    }
-
-    return right_dict, left_dict
 
 
 def _apply_coord_transform(right_dict, left_dict,
@@ -745,6 +699,31 @@ class HaWoRPipeline:
         self.hand_detect_model = YOLO(cfg.detector_path)
         self.hand_detect_model = self.hand_detect_model.to(self.device)
         self.metric = Metric3D(cfg.metric_3D_path, device=self.device)
+        
+        MANO_cfg = {
+            'DATA_DIR': '_DATA/data/',
+            'MODEL_PATH': '_DATA/data/mano',
+            'GENDER': 'neutral',
+            'NUM_HAND_JOINTS': 15,
+            'CREATE_BODY_POSE': False
+        }
+        mano_cfg = {k.lower(): v for k,v in MANO_cfg.items()}
+        self.mano = MANO(**mano_cfg).to(self.device)
+        self.mano.eval()
+        
+        MANO_cfg_left = {
+            'DATA_DIR': '_DATA/data_left/',
+            'MODEL_PATH': '_DATA/data_left/mano_left',
+            'GENDER': 'neutral',
+            'NUM_HAND_JOINTS': 15,
+            'CREATE_BODY_POSE': False,
+            'is_rhand': False
+        }
+        mano_cfg_left = {k.lower(): v for k,v in MANO_cfg_left.items()}
+        self.mano_left = MANO(**mano_cfg_left).to(self.device)
+        # fix MANO shapedirs of the left hand bug (https://github.com/vchoutas/smplx/issues/48)
+        self.mano_left.shapedirs[:, 0, :] *= -1
+        self.mano_left.eval()
 
         # ── DROID-SLAM 参数 ────────────────────────────────────────────
         import types
@@ -1441,6 +1420,53 @@ class HaWoRPipeline:
         # joblib.dump([pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid], save_path)
         return pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid
 
+    def _build_faces(self,):
+        """构建右手 / 左手的 face 数组。"""
+        faces_base = self.mano.faces()
+        faces_right = np.concatenate([faces_base, _FACES_NEW], axis=0)
+        faces_left = faces_right[:, [0, 2, 1]]
+        return faces_right, faces_left
+    
+    def _build_hand_dicts(self, pred_trans, pred_rot, pred_hand_pose, pred_betas,
+                      vis_start, vis_end, faces_right, faces_left):
+        """
+        用 MANO 模型前向推理，得到双手的顶点字典。
+
+        返回 (right_dict, left_dict)，其中每个 dict 包含：
+            - 'vertices': (1, T, N, 3) Tensor
+            - 'faces': np.ndarray
+        """
+        hand2idx = {"right": 1, "left": 0}
+
+        # 右手
+        hi = hand2idx["right"]
+        pred_glob_r = run_mano(
+            pred_trans[hi:hi + 1, vis_start:vis_end],
+            pred_rot[hi:hi + 1, vis_start:vis_end],
+            pred_hand_pose[hi:hi + 1, vis_start:vis_end],
+            betas=pred_betas[hi:hi + 1, vis_start:vis_end],
+            mano=self.mano
+        )
+        right_dict = {
+            "vertices": pred_glob_r["vertices"][0].unsqueeze(0),  # (1, T, N, 3)
+            "faces": faces_right,
+        }
+
+        # 左手
+        hi = hand2idx["left"]
+        pred_glob_l = run_mano_left(
+            pred_trans[hi:hi + 1, vis_start:vis_end],
+            pred_rot[hi:hi + 1, vis_start:vis_end],
+            pred_hand_pose[hi:hi + 1, vis_start:vis_end],
+            betas=pred_betas[hi:hi + 1, vis_start:vis_end],
+            mano=self.mano_left
+        )
+        left_dict = {
+            "vertices": pred_glob_l["vertices"][0].unsqueeze(0),  # (1, T, N, 3)
+            "faces": faces_left,
+        }
+
+        return right_dict, left_dict
     # ------------------------------------------------------------------
     # 重建主接口
     # ------------------------------------------------------------------
@@ -1595,17 +1621,17 @@ class HaWoRPipeline:
             overall_pb.close()
 
         # ── 构建双手网格字典 ─────────────────────────────────────────────
-        faces_right, faces_left = _build_faces()
+        faces_right, faces_left = self._build_faces()
         vis_start = 0
         vis_end = pred_trans.shape[1] - 1
 
-        right_dict, left_dict = _build_hand_dicts(
+        right_dict, left_dict = self._build_hand_dicts(
             pred_trans, pred_rot, pred_hand_pose, pred_betas,
             vis_start, vis_end, faces_right, faces_left
         )
         right_dict_smooth, left_dict_smooth = (None, None)
         if self.smooth_hands:
-            right_dict_smooth, left_dict_smooth = _build_hand_dicts(
+            right_dict_smooth, left_dict_smooth = self._build_hand_dicts(
                 pred_trans_smooth, pred_rot_smooth, pred_hand_pose_smooth, pred_betas,
                 vis_start, vis_end, faces_right, faces_left
             )

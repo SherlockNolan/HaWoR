@@ -26,7 +26,7 @@ def get_mano_faces():
     return mano.faces
 
 
-def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=True):
+def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=True, mano = None):
     """
     Forward pass of the SMPL model and populates pred_data accordingly with
     joints3d, verts3d, points3d.
@@ -37,17 +37,18 @@ def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=
     betas : (optional) B x D
     """
     block_print()
-    MANO_cfg = {
-        'DATA_DIR': '_DATA/data/',
-        'MODEL_PATH': '_DATA/data/mano',
-        'GENDER': 'neutral',
-        'NUM_HAND_JOINTS': 15,
-        'CREATE_BODY_POSE': False
-    }
-    mano_cfg = {k.lower(): v for k,v in MANO_cfg.items()}
-    mano = MANO(**mano_cfg)
-    if use_cuda:
-        mano = mano.cuda()
+    if not mano:
+        MANO_cfg = {
+            'DATA_DIR': '_DATA/data/',
+            'MODEL_PATH': '_DATA/data/mano',
+            'GENDER': 'neutral',
+            'NUM_HAND_JOINTS': 15,
+            'CREATE_BODY_POSE': False
+        }
+        mano_cfg = {k.lower(): v for k,v in MANO_cfg.items()}
+        mano = MANO(**mano_cfg)
+        if use_cuda:
+            mano = mano.cuda()
 
     B, T, _ = root_orient.shape
     NUM_JOINTS = 15
@@ -62,7 +63,7 @@ def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=
     rotmat_mano_params['transl'] = trans.reshape(B*T, 3)
 
     if use_cuda:
-        mano_output = mano(**{k: v.float().cuda() for k,v in rotmat_mano_params.items()}, pose2rot=False)
+        mano_output = mano(**{k: v.float().to(mano.device) for k,v in rotmat_mano_params.items()}, pose2rot=False)
     else:
         mano_output = mano(**{k: v.float() for k,v in rotmat_mano_params.items()}, pose2rot=False)
 
@@ -104,7 +105,7 @@ def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=
     enable_print()
     return outputs
 
-def run_mano_left(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=True, fix_shapedirs=True):
+def run_mano_left(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=True, fix_shapedirs=True, mano=None):
     """
     Forward pass of the SMPL model and populates pred_data accordingly with
     joints3d, verts3d, points3d.
@@ -115,22 +116,23 @@ def run_mano_left(trans, root_orient, hand_pose, is_right=None, betas=None, use_
     betas : (optional) B x D
     """
     block_print()
-    MANO_cfg = {
-        'DATA_DIR': '_DATA/data_left/',
-        'MODEL_PATH': '_DATA/data_left/mano_left',
-        'GENDER': 'neutral',
-        'NUM_HAND_JOINTS': 15,
-        'CREATE_BODY_POSE': False,
-        'is_rhand': False
-    }
-    mano_cfg = {k.lower(): v for k,v in MANO_cfg.items()}
-    mano = MANO(**mano_cfg)
-    if use_cuda:
-        mano = mano.cuda()
+    if not mano:
+        MANO_cfg = {
+            'DATA_DIR': '_DATA/data_left/',
+            'MODEL_PATH': '_DATA/data_left/mano_left',
+            'GENDER': 'neutral',
+            'NUM_HAND_JOINTS': 15,
+            'CREATE_BODY_POSE': False,
+            'is_rhand': False
+        }
+        mano_cfg = {k.lower(): v for k,v in MANO_cfg.items()}
+        mano = MANO(**mano_cfg)
+        if use_cuda:
+            mano = mano.cuda()
     
-    # fix MANO shapedirs of the left hand bug (https://github.com/vchoutas/smplx/issues/48)
-    if fix_shapedirs:
-        mano.shapedirs[:, 0, :] *= -1
+        # fix MANO shapedirs of the left hand bug (https://github.com/vchoutas/smplx/issues/48)
+        if fix_shapedirs:
+            mano.shapedirs[:, 0, :] *= -1
 
     B, T, _ = root_orient.shape
     NUM_JOINTS = 15
@@ -145,7 +147,7 @@ def run_mano_left(trans, root_orient, hand_pose, is_right=None, betas=None, use_
     rotmat_mano_params['transl'] = trans.reshape(B*T, 3)
 
     if use_cuda:
-        mano_output = mano(**{k: v.float().cuda() for k,v in rotmat_mano_params.items()}, pose2rot=False)
+        mano_output = mano(**{k: v.float().to(mano.device) for k,v in rotmat_mano_params.items()}, pose2rot=False)
     else:
         mano_output = mano(**{k: v.float() for k,v in rotmat_mano_params.items()}, pose2rot=False)
 
