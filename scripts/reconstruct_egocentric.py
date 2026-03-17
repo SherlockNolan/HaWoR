@@ -32,10 +32,18 @@ python scripts/reconstruct_egocentric.py \
     
 python scripts/reconstruct_egocentric.py \
     --start=0 --end=50000 \
-    --num-workers=50
+    --num-workers=30
 python scripts/reconstruct_egocentric.py \
     --start=100000 --end=200000 \
-    --num-workers=100
+    --num-workers=40
+
+python scripts/reconstruct_egocentric.py \
+    --start=100000 --end=100007 \
+    --num-workers=2
+    
+python scripts/reconstruct_egocentric.py \
+    --start=100007 --end=100100 \
+    --num-workers=20
 """
 
 

@@ -1422,7 +1422,7 @@ class HaWoRPipeline:
 
     def _build_faces(self,):
         """构建右手 / 左手的 face 数组。"""
-        faces_base = self.mano.faces()
+        faces_base = self.mano.faces
         faces_right = np.concatenate([faces_base, _FACES_NEW], axis=0)
         faces_left = faces_right[:, [0, 2, 1]]
         return faces_right, faces_left
@@ -1445,7 +1445,8 @@ class HaWoRPipeline:
             pred_rot[hi:hi + 1, vis_start:vis_end],
             pred_hand_pose[hi:hi + 1, vis_start:vis_end],
             betas=pred_betas[hi:hi + 1, vis_start:vis_end],
-            mano=self.mano
+            mano=self.mano,
+            device=self.device
         )
         right_dict = {
             "vertices": pred_glob_r["vertices"][0].unsqueeze(0),  # (1, T, N, 3)
@@ -1459,7 +1460,8 @@ class HaWoRPipeline:
             pred_rot[hi:hi + 1, vis_start:vis_end],
             pred_hand_pose[hi:hi + 1, vis_start:vis_end],
             betas=pred_betas[hi:hi + 1, vis_start:vis_end],
-            mano=self.mano_left
+            mano=self.mano_left,
+            device=self.device
         )
         left_dict = {
             "vertices": pred_glob_l["vertices"][0].unsqueeze(0),  # (1, T, N, 3)

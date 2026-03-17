@@ -26,7 +26,7 @@ def get_mano_faces():
     return mano.faces
 
 
-def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=True, mano = None):
+def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=True, mano = None, device="cuda"):
     """
     Forward pass of the SMPL model and populates pred_data accordingly with
     joints3d, verts3d, points3d.
@@ -63,7 +63,7 @@ def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=
     rotmat_mano_params['transl'] = trans.reshape(B*T, 3)
 
     if use_cuda:
-        mano_output = mano(**{k: v.float().to(mano.device) for k,v in rotmat_mano_params.items()}, pose2rot=False)
+        mano_output = mano(**{k: v.float().to(device) for k,v in rotmat_mano_params.items()}, pose2rot=False)
     else:
         mano_output = mano(**{k: v.float() for k,v in rotmat_mano_params.items()}, pose2rot=False)
 
@@ -105,7 +105,7 @@ def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=
     enable_print()
     return outputs
 
-def run_mano_left(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=True, fix_shapedirs=True, mano=None):
+def run_mano_left(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=True, fix_shapedirs=True, mano=None, device="cuda"):
     """
     Forward pass of the SMPL model and populates pred_data accordingly with
     joints3d, verts3d, points3d.
@@ -147,7 +147,7 @@ def run_mano_left(trans, root_orient, hand_pose, is_right=None, betas=None, use_
     rotmat_mano_params['transl'] = trans.reshape(B*T, 3)
 
     if use_cuda:
-        mano_output = mano(**{k: v.float().to(mano.device) for k,v in rotmat_mano_params.items()}, pose2rot=False)
+        mano_output = mano(**{k: v.float().to(device) for k,v in rotmat_mano_params.items()}, pose2rot=False)
     else:
         mano_output = mano(**{k: v.float() for k,v in rotmat_mano_params.items()}, pose2rot=False)
 
