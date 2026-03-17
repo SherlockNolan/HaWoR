@@ -16,8 +16,10 @@ import contextlib
 # 将当前脚本的父目录（即根目录）加入路径
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lib.pipeline.HaWoRPipeline import HaWoRPipeline, HaWoRConfig
-from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints
+# NOTE: HaWoR pipeline and adapter import are intentionally delayed
+# to avoid initializing CUDA at module import time in child processes.
+# They will be imported inside worker/main branches after setting
+# `CUDA_VISIBLE_DEVICES` appropriately.
 
 """
 python scripts/reconstruct_egocentric.py --video-path=\
@@ -31,11 +33,11 @@ python scripts/reconstruct_egocentric.py \
     --num-workers=4 --test
     
 python scripts/reconstruct_egocentric.py \
-    --start=0 --end=50000 \
-    --num-workers=30
+    --start=0 --end=100000 \
+    --num-workers=100
 python scripts/reconstruct_egocentric.py \
     --start=100000 --end=200000 \
-    --num-workers=40
+    --num-workers=100
 
 python scripts/reconstruct_egocentric.py \
     --start=100000 --end=100007 \
@@ -136,6 +138,10 @@ def reorder_videos_by_factory_worker(all_vids: list[str], root_dir: str) -> list
 _process_pipe = None
 _process_device = None
 _process_dtype = None
+# Placeholders for lazy imports (set inside worker or main when needed)
+HaWoRPipeline = None
+HaWoRConfig = None
+convert_hawor_to_keypoints = None
 
 
 @contextlib.contextmanager
@@ -174,11 +180,34 @@ def _worker_process_main(
         result_queue: 结果队列，每项为 (video_idx, status, message)
         init_queue:   初始化完成后上报 worker_id，主进程用于显示初始化进度
     """
+    # ── 关键修复：在任何 CUDA 操作之前设置 CUDA_VISIBLE_DEVICES ──────────
+    # DROID-SLAM 内部硬编码使用 "cuda:0"（droid.py、depth_video.py、
+    # motion_filter.py 均如此）。在多 GPU 场景下，若进程的 CUDA context
+    # 已初始化在 cuda:1/2/... 上，自定义 CUDA 算子（如 CorrSampler）会按
+    # 该 GPU 架构编译/加载；之后 DROID-SLAM 强行访问 cuda:0（不同架构），
+    # 就会触发 "no kernel image is available for execution on the device"。
+    # 解决方案：限制本进程只能看到分配的物理 GPU，使其在进程内以 cuda:0
+    # 身份出现，DROID-SLAM 的硬编码 cuda:0 便自动指向正确的物理 GPU。
+    gpu_idx = device_str.split(":")[-1] if ":" in device_str else "0"
+    os.environ["CUDA_VISIBLE_DEVICES"] = gpu_idx
+    device_str = "cuda:0"  # 限制可见性后，进程内 cuda:0 即为分配的物理 GPU
+    # ─────────────────────────────────────────────────────────────────────
+
     global _process_pipe
     pid = os.getpid()
     device = torch.device(device_str)
-    print(f"[Worker {worker_id} / PID {pid}] 初始化 pipeline 在 {device}", flush=True)
+    print(f"[Worker {worker_id} / PID {pid}] 初始化 pipeline 在 物理GPU {gpu_idx} (进程内为 {device})", flush=True)
     
+    # 延迟导入 HaWoR，以保证在设置好 CUDA_VISIBLE_DEVICES 后再触发 CUDA 初始化
+    try:
+        from lib.pipeline.HaWoRPipeline import HaWoRPipeline, HaWoRConfig
+        from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints as _convert_fn
+        # 将 adapter 函数注入到模块全局，这样其他 worker 内部函数可以使用它
+        globals()["convert_hawor_to_keypoints"] = _convert_fn
+    except Exception:
+        # 如果导入失败，仍然让错误冒出来以便主进程获知
+        raise
+
     # 使用 HaWoRPipeline
     cfg = HaWoRConfig(verbose=False, device=device_str)
     _process_pipe = HaWoRPipeline(cfg)
@@ -264,8 +293,13 @@ def process_video_worker_proc(
         with _suppress_all_output(enabled=True):
                 result_dict_origin = _process_pipe.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031) # 屏蔽原有输出
                 result_dict = dict()
-                result_dict["original_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=False)
-                result_dict["smoothed_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=True)
+                # Ensure adapter is imported in this process
+                if globals().get("convert_hawor_to_keypoints") is None:
+                    from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints as _convert_fn
+                    globals()["convert_hawor_to_keypoints"] = _convert_fn
+                _convert = globals()["convert_hawor_to_keypoints"]
+                result_dict["original_result"] = _convert(result_dict_origin, video_path, use_smoothed=False)
+                result_dict["smoothed_result"] = _convert(result_dict_origin, video_path, use_smoothed=True)
         # result_dict = _process_pipe.reconstruct(video_path, output_dir=pkl_dir) # 有完整输出信息的
         
         stop_monitoring.set()
@@ -315,13 +349,17 @@ def process_video_worker(video_path, pipe, extra_args=None):
         return f"Skipped (already exists): {os.path.basename(video_path)}"
     if not os.path.exists(pkl_dir):
         os.makedirs(pkl_dir, exist_ok=True)
-
     try:
         with _suppress_all_output(enabled=True):
             result_dict_origin = pipe.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031)
             result_dict = dict()
-            result_dict["original_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=False)
-            result_dict["smoothed_result"] = convert_hawor_to_keypoints(result_dict_origin, video_path, use_smoothed=True)
+            # Ensure adapter available in this process
+            if globals().get("convert_hawor_to_keypoints") is None:
+                from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints as _convert_fn
+                globals()["convert_hawor_to_keypoints"] = _convert_fn
+            _convert = globals()["convert_hawor_to_keypoints"]
+            result_dict["original_result"] = _convert(result_dict_origin, video_path, use_smoothed=False)
+            result_dict["smoothed_result"] = _convert(result_dict_origin, video_path, use_smoothed=True)
 
         if result_dict:
             with open(pkl_path, "wb") as f:
@@ -728,14 +766,16 @@ def main():
         print_summary(results)
         exit()
 
-    device = (
-        torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    )
+    # Avoid any torch.cuda.* checks here to prevent CUDA initialization
+    # in the parent process before child processes set their CUDA_VISIBLE_DEVICES.
     dtype = torch.float16
     print("Running in detection mode.")
     # If num_workers <= 1, keep sequential processing to preserve original behaviour.
 
     if args.num_workers <= 1:
+        # Sequential mode: import HaWoR here (after deciding not to spawn workers)
+        from lib.pipeline.HaWoRPipeline import HaWoRPipeline, HaWoRConfig
+        from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints
         cfg = HaWoRConfig(verbose=False)
         pipe = HaWoRPipeline(cfg)
         for video_path in tqdm(
