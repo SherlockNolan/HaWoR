@@ -343,7 +343,9 @@ def render_hand_results(
             return final_mp4
         return None
     except Exception as e:
-        print(f"[render_hand_results] Rendering failed: {e.__traceback__}")
+        import traceback
+        error_stack = traceback.format_exc()
+        print(f"[render_hand_results] Rendering failed: {e}, {error_stack}")
         note="""
 Please make sure you have a dispay for running. If you are runing this script on a server, please set environment virable like this:
 ```

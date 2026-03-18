@@ -18,15 +18,17 @@ HaworPipeline 完成重建，并复用公共渲染函数 render_hand_results 输
        python reconstruct_vitra.py --video_path example/video_0.mp4 --output_dir ./results --rendering --vis_mode cam
 
 注意：渲染依赖显示器（aitviewer），无显示器时请在服务器端如下设置：
-  export MGLW_WINDOW=moderngl_window.context.headless.Window
-  export PYOPENGL_PLATFORM=egl
-  xvfb-run -a python reconstruct_vitra.py --video_path example/video_0.mp4 --output_dir ./results --rendering
+export MGLW_WINDOW=moderngl_window.context.headless.Window
+export PYOPENGL_PLATFORM=egl
+xvfb-run -a python scripts/reconstruct_vitra.py --video_path example/video_0.mp4 --output_dir ./results --rendering
 """
 
 import argparse
 import os
 import sys
-
+# 将当前脚本的父目录（即根目录）加入路径
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cv2
 import numpy as np
 import torch

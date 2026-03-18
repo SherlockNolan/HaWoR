@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 import sys
-
+import gc
 from infiller.lib.model.network import TransformerModel
 
 sys.path.insert(0, 'thirdparty/DROID-SLAM/droid_slam')
@@ -21,6 +21,7 @@ from torchvision.transforms import Resize
 from natsort import natsorted
 from natsort import natsorted
 from tqdm import tqdm
+from typing import Optional
 import subprocess
 if torch.cuda.is_available():
     autocast = torch.cuda.amp.autocast
@@ -746,8 +747,12 @@ class HaWoRPipeline:
         # ── Infiller 模型 ──────────────────────────────────────────────
         self.filling_model = self._load_infiller_model()
         
-        # ── 进度 ──────────────────────────────────────────────
-        self.progress_percentage = 0.0 # 0-1的实数表示总处理进度
+        # ── 进度管理 ──────────────────────────────────────────────
+        self.progress_percentage = 0.0  # 0-1的实数表示总处理进度
+        self._overall_pb = None  # 外层进度条对象
+        self._stage_pb = None    # 当前阶段的子进度条对象
+        self._current_stage_base = 0.0  # 当前阶段的起始进度（0-1）
+        self._current_stage_weight = 0.0  # 当前阶段占总进度的权重
 
     @classmethod
     def from_kwargs(cls, **kwargs) -> "HaWoRPipeline":
@@ -779,6 +784,99 @@ class HaWoRPipeline:
         filling_model = filling_model.to(self.device)
         filling_model.eval()
         return filling_model
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 进度管理辅助方法
+    # ────────────────────────────────────────────────────────────────────────
+
+    def _init_progress(self, num_stages: int, use_progress_bar: bool = True):
+        """
+        初始化进度管理。
+
+        Parameters
+        ----------
+        num_stages : int
+            总的阶段数。
+        use_progress_bar : bool
+            是否显示进度条。
+        """
+        if use_progress_bar:
+            from tqdm import tqdm
+            self._overall_pb = tqdm(total=num_stages, desc="Overall Progress", unit="stage")
+        else:
+            self._overall_pb = None
+        self._current_stage = 0
+        self._num_stages = num_stages
+
+    def _start_stage(self, stage_name: str, total_steps: int = 100, desc: Optional[str] = None):
+        """
+        开始一个新阶段，创建子进度条。
+
+        Parameters
+        ----------
+        stage_name : str
+            阶段名称（用于显示）。
+        total_steps : int
+            该阶段的子步骤总数。
+        desc : str
+            子进度条的描述。
+        """
+        self._current_stage += 1
+        self._current_stage_base = (self._current_stage - 1) / self._num_stages
+        self._current_stage_weight = 1.0 / self._num_stages
+        self._stage_step = 0
+        self._stage_total_steps = total_steps
+
+        if self._overall_pb is not None:
+            if desc is None:
+                desc = f"Stage {self._current_stage}/{self._num_stages}: {stage_name}"
+            self._stage_pb = tqdm(total=total_steps, desc=desc, unit="step",
+                                leave=False, position=1, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}')
+        else:
+            self._stage_pb = None
+
+    def _update_stage_progress(self, steps: int = 1):
+        """
+        更新当前阶段的进度。
+
+        Parameters
+        ----------
+        steps : int
+            完成的子步骤数。
+        """
+        if self._stage_pb is not None:
+            self._stage_pb.update(steps)
+        self._stage_step += steps
+
+        # 更新总进度
+        if self._stage_total_steps > 0:
+            stage_progress = self._stage_step / self._stage_total_steps
+            self.progress_percentage = self._current_stage_base + stage_progress * self._current_stage_weight
+
+    def _complete_stage(self):
+        """完成当前阶段，关闭子进度条并更新总进度条。"""
+        if self._stage_pb is not None:
+            # 确保子进度条填满
+            remaining = self._stage_total_steps - self._stage_step
+            if remaining > 0:
+                self._stage_pb.update(remaining)
+            self._stage_pb.close()
+            self._stage_pb = None
+
+        if self._overall_pb is not None:
+            self._overall_pb.update(1)
+
+        # 更新总进度到阶段完成状态
+        self.progress_percentage = self._current_stage_base + self._current_stage_weight
+
+    def _close_all_progress(self):
+        """关闭所有进度条。"""
+        if self._stage_pb is not None:
+            self._stage_pb.close()
+            self._stage_pb = None
+        if self._overall_pb is not None:
+            self._overall_pb.close()
+            self._overall_pb = None
 
     # # ------------------------------------------------------------------
     # # 内部辅助：把 args namespace 透传给各子模块
@@ -893,6 +991,9 @@ class HaWoRPipeline:
         if self.verbose:
             print(f'Running hawor ...')
 
+        # 统计总chunk数用于进度更新
+        total_hands = len(tid)
+
         left_trk = []
         right_trk = []
         for k, idx in enumerate(tid):
@@ -922,6 +1023,9 @@ class HaWoRPipeline:
         max_faces_per_bin = 20000
         renderer = Renderer(img.shape[1], img.shape[0], image_focal, self.device,
                             bin_size=bin_size, max_faces_per_bin=max_faces_per_bin)
+
+        self._update_stage_progress(10)  # 初始化完成
+
         # get faces
         faces = get_mano_faces()
         faces_new = np.array([[92, 38, 234],
@@ -943,7 +1047,11 @@ class HaWoRPipeline:
 
         frame_chunks_all = defaultdict(list)
         pred_hand_json = {}
-        for idx in tid:
+
+        # 计算每只手的进度权重
+        progress_per_hand = 90 / max(total_hands, 1)  # 剩余90%分配给各个手
+
+        for hand_idx, idx in enumerate(tid):
             print(f"tracklet {idx}:")
             pred_hand_json[idx] = {}
             trk = final_tracks[idx]
@@ -951,6 +1059,7 @@ class HaWoRPipeline:
             # interp bboxes
             valid = np.array([t['det'] for t in trk])
             if valid.sum() < 2:
+                self._update_stage_progress(int(progress_per_hand))  # 即使跳过也更新进度
                 continue
             boxes = np.concatenate([t['det_box'] for t in trk])
             non_zero_indices = np.where(np.any(boxes != 0, axis=1))[0]
@@ -972,7 +1081,11 @@ class HaWoRPipeline:
             frame_chunks_all[idx] = frame_chunks
 
             if len(frame_chunks) == 0:
+                self._update_stage_progress(int(progress_per_hand))
                 continue
+
+            # 计算当前手每个chunk的进度权重
+            progress_per_chunk = progress_per_hand / max(len(frame_chunks), 1)
 
             for frame_ck, boxes_ck in zip(frame_chunks, boxes_chunks):
                 if self.verbose:
@@ -1043,6 +1156,8 @@ class HaWoRPipeline:
                                                           verts_color.unsqueeze(0).to(self.device), cameras, lights)
 
                     model_masks[frame_ck[img_i]] += mask
+
+                self._update_stage_progress(int(progress_per_chunk))  # 每处理一个chunk更新进度
 
         model_masks = model_masks > 0  # bool
         # np.save(f'{seq_folder}/tracks_{start_idx}_{end_idx}/model_masks.npy', model_masks)
@@ -1188,6 +1303,9 @@ class HaWoRPipeline:
         if self.verbose:
             print(f'Running slam ...')
 
+        # 初始化进度（10%）
+        self._update_stage_progress(10)
+
         ##### Run SLAM #####
         # Use Masking
         # masks = np.load(f'{video_folder}/tracks_{start_idx}_{end_idx}/model_masks.npy', allow_pickle=True)
@@ -1211,7 +1329,8 @@ class HaWoRPipeline:
         center = calib[2:]
         calib[:2] = focal
 
-        # Droid-slam with masking
+        # Droid-slam with masking (30%)
+        self._update_stage_progress(30)
         droid, traj = self._run_slam(images_BGR, masks=masks, calib=calib)
         n = droid.video.counter.value
         tstamp = droid.video.tstamp.cpu().int().numpy()[:n]
@@ -1221,6 +1340,9 @@ class HaWoRPipeline:
 
         del droid  # 一条视频单独使用一个droid实例！
         torch.cuda.empty_cache()
+
+        # SLAM完成 (总进度50%)
+        self._update_stage_progress(10)
 
         # Estimate scale
         # block_print() # 临时禁用打印输出，避免 Metric3D 模型加载或推理时产生过多日志干扰
@@ -1235,18 +1357,24 @@ class HaWoRPipeline:
         pred_depths = []
 
         H, W = self._get_dimension(first_img)
-        for t in tqdm(tstamp):
+        total_keyframes = len(tstamp)
+        progress_per_depth = 35 / max(total_keyframes, 1)  # 深度预测占35%
+
+        for t in tstamp:
             img = images_BGR[t]
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             pred_depth = self.metric(img_rgb, calib)
             pred_depth = cv2.resize(pred_depth, (W, H))
             pred_depths.append(pred_depth)
+            self._update_stage_progress(int(progress_per_depth))  # 每预测一帧更新进度
 
         ##### Estimate Metric Scale #####
         print('Estimating Metric Scale ...')
         scales_ = []
         n = len(tstamp)  # for each keyframe
-        for i in tqdm(range(n)):
+        progress_per_scale = 5 / max(n, 1)  # 尺度估计占5%
+
+        for i in range(n):
             t = tstamp[i]
             disp = disps[i]
             pred_depth = pred_depths[i]
@@ -1262,6 +1390,7 @@ class HaWoRPipeline:
                 scale = est_scale_hybrid(slam_depth, pred_depth, sigma=0.5, msk=msk, near_thresh=min_threshold,
                                          far_thresh=max_threshold)
             scales_.append(scale)
+            self._update_stage_progress(int(progress_per_scale))  # 每估计一个尺度更新进度
 
         median_s = np.median(scales_)
         if self.verbose:
@@ -1309,8 +1438,20 @@ class HaWoRPipeline:
         pred_betas = torch.zeros(2, len(images_BGR), 10)
         pred_valid = torch.zeros((2, pred_betas.size(1)))
 
+        # 坐标转换（20%）
+        self._update_stage_progress(20)
+
         # camera space to world space
         tid = [0, 1]
+        total_chunks = 0
+        for idx in tid:
+            frame_chunks = frame_chunks_all[idx]
+            total_chunks += len(frame_chunks)
+
+        progress_per_chunk = 0
+        if total_chunks > 0:
+            progress_per_chunk = 0  # 坐标转换已经在上面的_update_stage_progress(20)中处理
+
         for k, idx in enumerate(tid):
             frame_chunks = frame_chunks_all[idx]
 
@@ -1342,15 +1483,25 @@ class HaWoRPipeline:
         # runing fillingnet for this video
         frame_list = torch.tensor(list(range(pred_trans.size(1))))
         pred_valid = (pred_valid > 0).numpy()
+
+        # 计算每只手的填充进度权重（各占40%）
+        progress_per_hand = 80 / 2  # 总共80%，两只手平分
+
         for k, idx in enumerate([1, 0]):
             missing = ~pred_valid[idx]
 
             frame = frame_list[missing]
             frame_chunks = parse_chunks_hand_frame(frame)  # 这边进行帧分块处理
 
+            if len(frame_chunks) == 0:
+                self._update_stage_progress(int(progress_per_hand))  # 即使没有缺失帧也更新进度
+                continue
+
+            progress_per_chunk = progress_per_hand / max(len(frame_chunks), 1)
+
             if self.verbose:
                 print(f"run infiller on {idx2hand[idx]} hand ...")
-            for frame_ck in tqdm(frame_chunks):
+            for frame_ck in frame_chunks:
                 start_shift = -1
                 while frame_ck[0] + start_shift >= 0 and pred_valid[:, frame_ck[0] + start_shift].sum() != 2:
                     start_shift -= 1  # Shift to find the previous valid frame as start
@@ -1416,6 +1567,8 @@ class HaWoRPipeline:
                 pred_hand_pose[:, filling_net_start:filling_net_end] = torch.from_numpy(filling_seq['hand_pose'][:])
                 pred_betas[:, filling_net_start:filling_net_end] = torch.from_numpy(filling_seq['betas'][:])
                 pred_valid[:, filling_net_start:filling_net_end] = 1
+
+                self._update_stage_progress(int(progress_per_chunk))  # 每处理一个chunk更新进度
         # save_path = os.path.join(seq_folder, "world_space_res.pth")
         # joblib.dump([pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid], save_path)
         return pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid
@@ -1517,28 +1670,30 @@ class HaWoRPipeline:
         smoothing_enabled = bool(self.smooth_hands or self.smooth_camera)
         num_stages = 4 + (1 if smoothing_enabled else 0)
         self.progress_percentage = 0.0
-        overall_pb = None
-        if use_progress_bar:
-            overall_pb = tqdm(total=num_stages, desc="Overall Progress", unit="stage")
+        self._init_progress(num_stages, use_progress_bar)
 
         # ── Step 1: 检测 & 追踪 ─────────────────────────────────────────
         if self.verbose:
             print("[HaWoR] Step 1/4 — Detect & Track")
         file = video_path
         os.makedirs(output_dir, exist_ok=True)
+
+        # Step 1 的子步骤：提取帧(20%) + 检测追踪(80%)
+        self._start_stage("Detect & Track", total_steps=100, desc="Detect & Track")
+
         if self.verbose:
             print(f'Running detect_track on {file} ...')
 
         ##### Extract Frames #####
         images_BGR = self._extract_frames(video_path, start_idx, end_idx)
+        self._update_stage_progress(20)  # 提取帧完成
 
         ##### Detection + Track #####
         if self.verbose:
             print('Detect and Track ...')
         boxes, tracks = self._detect_track(images_BGR, thresh=0.2)
-        if overall_pb is not None:
-            self.progress_percentage += 1/num_stages
-            overall_pb.update(1)
+        self._update_stage_progress(80)  # 检测追踪完成
+        self._complete_stage()
 
         # ── Step 2: HaWoR 运动估计 ──────────────────────────────────────
         if self.verbose:
@@ -1546,20 +1701,24 @@ class HaWoRPipeline:
         if image_focal is None:
             image_focal = 600
             print(f'No focal length provided, use default {image_focal}')
+
+        # Step 2 的子步骤：初始化(10%) + 左手推理(45%) + 右手推理(45%)
+        self._start_stage("Motion Estimation", total_steps=100, desc="HaWoR Motion Estimation")
+
         frame_chunks_all, model_masks, pred_hand_json = self._hawor_motion_estimation(
             images_BGR, image_focal, tracks
         )
-        if overall_pb is not None:
-            self.progress_percentage += 1/num_stages
-            overall_pb.update(1)
+        self._complete_stage()
 
         # ── Step 3: SLAM ─────────────────────────────────────────────────
         if self.verbose:
             print("[HaWoR] Step 3/4 — SLAM")
+
+        # Step 3 的子步骤：SLAM运行(40%) + 深度预测(40%) + 尺度估计(20%)
+        self._start_stage("SLAM", total_steps=100, desc="SLAM")
+
         pred_cam = self._hawor_slam(images_BGR, model_masks, image_focal)
-        if overall_pb is not None:
-            self.progress_percentage += 1/num_stages
-            overall_pb.update(1)
+        self._complete_stage()
 
         def _load_slam_cam(pred_cam):
             pred_traj = pred_cam['traj']
@@ -1579,14 +1738,16 @@ class HaWoRPipeline:
 
         # ── Step 4: Infiller ─────────────────────────────────────────────
         print("[HaWoR] Step 4/4 — Infiller")
+
+        # Step 4 的子步骤：坐标转换(20%) + 左手填充(40%) + 右手填充(40%)
+        self._start_stage("Infiller", total_steps=100, desc="Infiller")
+
         pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = \
             self._hawor_infiller(images_BGR, frame_chunks_all, slam_cam, pred_hand_json)
         # pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = \
         #     hawor_infiller_plain(args, start_idx, end_idx, frame_chunks_all)
 
-        if overall_pb is not None:
-            self.progress_percentage += 1/num_stages
-            overall_pb.update(1)  # infiller accounted for
+        self._complete_stage()
 
         # ── Step 5: 抖动检测与平滑 ────────────────────────────────────────
         pred_trans_smooth, pred_rot_smooth, pred_hand_pose_smooth = (None, None, None)
@@ -1616,11 +1777,14 @@ class HaWoRPipeline:
             t_w2c_sla_all_smooth = -torch.einsum("bij,bj->bi", R_w2c_sla_all_smooth, t_c2w_sla_all_smooth)
 
         # Update overall progress after smoothing stage if enabled
-        if overall_pb is not None:
-            if smoothing_enabled:
-                self.progress_percentage += 1/num_stages
-                overall_pb.update(1)
-            overall_pb.close()
+        if smoothing_enabled:
+            self._start_stage("Smoothing", total_steps=100, desc="Smoothing")
+            if self.smooth_hands:
+                self._update_stage_progress(50)  # 手部平滑占一半
+            if self.smooth_camera:
+                self._update_stage_progress(50)  # 相机平滑占一半
+            self._complete_stage()
+        self._close_all_progress()
 
         # ── 构建双手网格字典 ─────────────────────────────────────────────
         faces_right, faces_left = self._build_faces()
@@ -1746,7 +1910,9 @@ class HaWoRPipeline:
             result["rendered_video"] = rendered_video
             if rendered_video:
                 print(f"[HaWoR] Rendered video saved to: {rendered_video}")
-
+        # 在处理循环的末尾添加
+        torch.cuda.empty_cache()
+        gc.collect()
         return result
 
     # ------------------------------------------------------------------

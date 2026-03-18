@@ -22,34 +22,47 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # `CUDA_VISIBLE_DEVICES` appropriately.
 
 """
-python scripts/reconstruct_egocentric.py --video-path=\
+python scripts/reconstruct_egocentric_chunk.py --video-path=\
 "/inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/ziyu/DATASET/Rhos_VR_EgoHands/align_blocks/recording_2026-01-13T12-13-48_remote_0.mp4" \
 --output="results/" \
 --start=0 --end=1 --no-interleave --num-workers=1 --save-origin
 
 
-python scripts/reconstruct_egocentric.py \
+python scripts/reconstruct_egocentric_chunk.py \
     --output="results/" \
     --num-workers=4 --test
-    
-python scripts/reconstruct_egocentric.py \
-    --start=0 --end=100000 \
-    --num-workers=56
-python scripts/reconstruct_egocentric.py \
+
+python scripts/reconstruct_egocentric_chunk.py \
+    --start=0 --end=50000 \
+    --num-workers=30
+
+python scripts/reconstruct_egocentric_chunk.py \
     --start=100000 --end=200000 \
-    --num-workers=72
-
-24 
-100不行
-
+    --num-workers=40
 
 python scripts/reconstruct_egocentric.py \
     --start=100000 --end=100007 \
     --num-workers=2
-    
+
 python scripts/reconstruct_egocentric.py \
-    --start=100007 --end=100015 \
-    --num-workers=2
+    --start=100007 --end=100100 \
+    --num-workers=20
+
+# 使用分段处理模式处理大视频（降低内存占用）
+python scripts/reconstruct_egocentric.py \
+    --video-path="large_video.mp4" \
+    --output="results/" \
+    --use-chunked \
+    --chunk-size=1000 \
+    --overlap-frames=120 \
+    --num-workers=1
+
+# 多进程 + 分段处理
+python scripts/reconstruct_egocentric.py \
+    --output="results/" \
+    --use-chunked \
+    --chunk-size=1000 \
+    --num-workers=4
 """
 
 
@@ -201,10 +214,11 @@ def _worker_process_main(
     pid = os.getpid()
     device = torch.device(device_str)
     print(f"[Worker {worker_id} / PID {pid}] 初始化 pipeline 在 物理GPU {gpu_idx} (进程内为 {device})", flush=True)
-    
+
     # 延迟导入 HaWoR，以保证在设置好 CUDA_VISIBLE_DEVICES 后再触发 CUDA 初始化
     try:
         from lib.pipeline.HaWoRPipeline import HaWoRPipeline, HaWoRConfig
+        from lib.pipeline.HaWoRPipelineChunk import HaWoRPipelineChunk
         from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints as _convert_fn
         # 将 adapter 函数注入到模块全局，这样其他 worker 内部函数可以使用它
         globals()["convert_hawor_to_keypoints"] = _convert_fn
@@ -212,9 +226,14 @@ def _worker_process_main(
         # 如果导入失败，仍然让错误冒出来以便主进程获知
         raise
 
-    # 使用 HaWoRPipeline
+    # 使用 HaWoRPipeline 或 HaWoRPipelineChunk（根据 extra_args）
+    # 注意：此时 extra_args 还未传入，使用默认配置
+    # 实际使用中会在 process_video_worker_proc 中根据 use_chunked 参数决定调用方式
     cfg = HaWoRConfig(verbose=False, device=device_str)
     _process_pipe = HaWoRPipeline(cfg)
+    # 同时初始化 chunked version（按需使用）
+    _process_pipe_chunk = HaWoRPipelineChunk(cfg)
+    globals()["_process_pipe_chunk"] = _process_pipe_chunk
     
     # 通知主进程：本 Worker 初始化完成
     init_queue.put((worker_id, device_str))
@@ -251,15 +270,21 @@ def process_video_worker_proc(
 ):
     """Worker function for use in ProcessPoolExecutor.
 
-    每个子进程在进程初始化时已经创建好自己的 pipeline（_process_pipe），
+    每个子进程在进程初始化时已经创建好自己的 pipeline（_process_pipe 和 _process_pipe_chunk），
     此处直接使用，不再重复创建，彻底绕开 GIL。
+
+    根据 extra_args 中的 use_chunked 参数选择使用哪个 pipeline。
     """
-    global _process_pipe
+    global _process_pipe, _process_pipe_chunk
     if extra_args is None:
         extra_args = {}
     dataset_root = extra_args.get("dataset_root", "")
     output_root = extra_args.get("output_root", "")
     save_origin = extra_args.get("save_origin", False)
+    use_chunked = extra_args.get("use_chunked", False)
+    chunk_size = extra_args.get("chunk_size", 1000)
+    overlap_frames = extra_args.get("overlap_frames", 120)
+
     pkl_path = video_path.replace(".mp4", "_hawor.pkl")
     pkl_path = pkl_path.replace(dataset_root, output_root)
     pkl_dir = os.path.dirname(pkl_path)
@@ -270,42 +295,53 @@ def process_video_worker_proc(
     if not os.path.exists(pkl_dir):
         os.makedirs(pkl_dir, exist_ok=True)
 
+    # 选择使用的 pipeline
+    pipeline = _process_pipe_chunk if use_chunked else _process_pipe
+    if pipeline is None:
+        raise RuntimeError("Worker pipeline 未初始化。")
+
     success = False
     try:
-        if _process_pipe is None:
-            raise RuntimeError("Worker pipeline 未初始化。")
-
         # 启动进度监听线程（针对 HaWoR 的百分比进度）
         stop_monitoring = threading.Event()
         def monitor_progress():
             last_p = -1.0
             while not stop_monitoring.is_set():
-                p = getattr(_process_pipe, "progress_percentage", 0.0)
+                p = getattr(pipeline, "progress_percentage", 0.0)
                 if p != last_p:
                     if progress_queue is not None:
                         progress_queue.put(("progress", video_idx, p, worker_id))
                     last_p = p
                 time.sleep(0.1)
-        
+
         mon_thread = threading.Thread(target=monitor_progress, daemon=True)
         mon_thread.start()
 
         if progress_queue is not None:
              progress_queue.put(("init", video_idx, 1.0, worker_id, os.path.basename(video_path)))
 
-        
+
         with _suppress_all_output(enabled=True):
-                result_dict_origin = _process_pipe.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031) # 屏蔽原有输出
-                result_dict = dict()
-                # Ensure adapter is imported in this process
-                if globals().get("convert_hawor_to_keypoints") is None:
-                    from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints as _convert_fn
-                    globals()["convert_hawor_to_keypoints"] = _convert_fn
-                _convert = globals()["convert_hawor_to_keypoints"]
-                result_dict["original_result"] = _convert(result_dict_origin, video_path, use_smoothed=False)
-                result_dict["smoothed_result"] = _convert(result_dict_origin, video_path, use_smoothed=True)
-        # result_dict = _process_pipe.reconstruct(video_path, output_dir=pkl_dir) # 有完整输出信息的
-        
+            if use_chunked:
+                # 使用分段处理模式（HaWoRPipelineChunk 的 reconstruct 方法支持这些参数）
+                result_dict_origin = pipeline.reconstruct(
+                    video_path, output_dir=pkl_dir, image_focal=1031,
+                    chunk_size=chunk_size, overlap_frames=overlap_frames,
+                    use_progress_bar=False
+                )
+            else:
+                # 使用标准模式
+                result_dict_origin = pipeline.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031, use_progress_bar=False)
+
+            result_dict = dict()
+            # Ensure adapter is imported in this process
+            if globals().get("convert_hawor_to_keypoints") is None:
+                from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints as _convert_fn
+                globals()["convert_hawor_to_keypoints"] = _convert_fn
+            _convert = globals()["convert_hawor_to_keypoints"]
+            result_dict["original_result"] = _convert(result_dict_origin, video_path, use_smoothed=False)
+            result_dict["smoothed_result"] = _convert(result_dict_origin, video_path, use_smoothed=True)
+
         stop_monitoring.set()
         mon_thread.join()
 
@@ -339,13 +375,19 @@ def process_video_worker_proc(
 def process_video_worker(video_path, pipe, extra_args=None):
     """
     A worker function that handles processing and saving for a single video.
-    Designed to be called from a ProcessPoolExecutor.
+    Designed to be called from a ProcessPoolExecutor or sequential mode.
+
+    根据 extra_args 中的 use_chunked 参数决定是否使用分段处理模式。
     """
     if extra_args is None:
         extra_args = {}
     dataset_root = extra_args.get("dataset_root", "")
     output_root = extra_args.get("output_root", "")
     save_origin = extra_args.get("save_origin", False)
+    use_chunked = extra_args.get("use_chunked", False)
+    chunk_size = extra_args.get("chunk_size", 1000)
+    overlap_frames = extra_args.get("overlap_frames", 120)
+
     pkl_path = video_path.replace(".mp4", "_hawor.pkl")
     pkl_path = pkl_path.replace(dataset_root, output_root)
     pkl_dir = os.path.dirname(pkl_path)
@@ -355,7 +397,17 @@ def process_video_worker(video_path, pipe, extra_args=None):
         os.makedirs(pkl_dir, exist_ok=True)
     try:
         with _suppress_all_output(enabled=True):
-            result_dict_origin = pipe.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031)
+            if use_chunked:
+                # 使用分段处理模式（HaWoRPipelineChunk）
+                result_dict_origin = pipe.reconstruct(
+                    video_path, output_dir=pkl_dir, image_focal=1031,
+                    chunk_size=chunk_size, overlap_frames=overlap_frames,
+                    use_progress_bar=False
+                )
+            else:
+                # 使用标准模式
+                result_dict_origin = pipe.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031, use_progress_bar=False)
+
             result_dict = dict()
             # Ensure adapter available in this process
             if globals().get("convert_hawor_to_keypoints") is None:
@@ -721,8 +773,28 @@ def main():
         default=1,
         help="Number of CPU processes to use for parallel processing. Use 1 for sequential execution.",
     )
+    # 分段处理参数
+    parser.add_argument(
+        "--use-chunked",
+        action="store_true",
+        help="使用分段处理模式（HaWoRPipelineChunk）来降低大视频的内存占用。适合处理超长视频。",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=1000,
+        help="分段处理的每块帧数。默认 1000。与 --use-chunked 一起使用。",
+    )
+    parser.add_argument(
+        "--overlap-frames",
+        type=int,
+        default=120,
+        help="分段之间的重叠帧数。默认 120（与 Infiller horizon 一致）。与 --use-chunked 一起使用。",
+    )
 
     args = parser.parse_args()
+    
+    args.use_chunked = True  # 强制启用分段处理，降低内存占用，适合长视频
     
     if args.test:
         args.dataroot = DEFAULT_DATASET_ROOT_TEST
@@ -733,6 +805,9 @@ def main():
         "dataset_root": args.dataroot,
         "output_root": args.output,
         "save_origin": args.save_origin,
+        "use_chunked": args.use_chunked,
+        "chunk_size": args.chunk_size,
+        "overlap_frames": args.overlap_frames,
     }
     
 
@@ -780,8 +855,15 @@ def main():
         # Sequential mode: import HaWoR here (after deciding not to spawn workers)
         from lib.pipeline.HaWoRPipeline import HaWoRPipeline, HaWoRConfig
         from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints
-        cfg = HaWoRConfig(verbose=False)
-        pipe = HaWoRPipeline(cfg)
+        # 根据 use_chunked 参数选择 pipeline
+        if args.use_chunked:
+            from lib.pipeline.HaWoRPipelineChunk import HaWoRPipelineChunk
+            cfg = HaWoRConfig(verbose=False)
+            pipe = HaWoRPipelineChunk(cfg)
+            print(f"[INFO] Using HaWoRPipelineChunk with chunk_size={args.chunk_size}, overlap={args.overlap_frames}")
+        else:
+            cfg = HaWoRConfig(verbose=False)
+            pipe = HaWoRPipeline(cfg)
         for video_path in tqdm(
             selected_vid_list, desc="Processing videos", unit="video"
         ):
@@ -791,7 +873,7 @@ def main():
         process_multi_workers(args, dtype, selected_vid_list, extra_args=extra_args)
 
     print("\n--- Detection complete. Now checking generated PKL files ---")
-    results = check_pkl_files(selected_vid_list, verbose=False, extra_args=extra_args)
+    results = check_pkl_files(selected_vid_list, verbose=True, extra_args=extra_args)
     print_summary(results)
 
 # --- Main Execution Block ---
