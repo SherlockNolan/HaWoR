@@ -32,11 +32,11 @@ python scripts/reconstruct_egocentric_chunk.py \
     --output="results/" \
     --num-workers=4 --test
 
-python scripts/reconstruct_egocentric_chunk.py \
+python scripts/reconstruct_egocentric.py \
     --start=0 --end=50000 \
     --num-workers=30
 
-python scripts/reconstruct_egocentric_chunk.py \
+python scripts/reconstruct_egocentric.py \
     --start=100000 --end=200000 \
     --num-workers=40
 

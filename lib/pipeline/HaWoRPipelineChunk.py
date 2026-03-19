@@ -84,8 +84,6 @@ class HaWoRPipelineChunk(HaWoRPipeline):
             result: 包含重建结果的字典
         """
         # ── 预处理：获取视频总帧数并计算分块 ─────────────────────────────
-        if overlap_frames > chunk_size:
-            raise ValueError(f"错误的指定了 overlap_frames: {overlap_frames} 和 chunk_size: {chunk_size}，overlap_frames不能高于chunk_size")
         first_frame = self._extract_frames(video_path, 0, 1)
         if len(first_frame) == 0:
             raise RuntimeError(f"无法读取视频: {video_path}")
@@ -180,7 +178,11 @@ class HaWoRPipelineChunk(HaWoRPipeline):
             print(f"\n[HaWoRChunk] ========== 合并 {len(self._chunk_results)} 个分块结果 ==========")
 
         merged_result = self._merge_chunk_results(
-            self._chunk_results, chunk_ranges, overlap_frames
+            self._chunk_results, chunk_ranges, overlap_frames, smoothed=False
+        )
+        
+        merged_result["smoothed_result"] = self._merge_chunk_results(
+            self._chunk_results, chunk_ranges, overlap_frames, smoothed=True
         )
 
         # ── 清理分块临时数据 ───────────────────────────────────────────────
@@ -192,15 +194,55 @@ class HaWoRPipelineChunk(HaWoRPipeline):
         if rendering:
             if self.verbose:
                 print(f"\n[HaWoRChunk] ========== 渲染视频 ==========")
+                print("[WARNING] You are trying to render the video which calls the original old API and it will generate temp frame images to seq_folder which degrades the performance. It's recommended to use rendering in testing single video only.")
+            # collect image files 仅用于接口的统一。渲染接口需要把每一帧拆成images，太多处了，不想改了。为了接口统一，暂时生成images
+            file = video_path
+            root = os.path.dirname(file)
+            seq = os.path.basename(file).split('.')[0]
 
-            # 需要提取所有帧用于渲染
-            rendered_video_path = self._render_merged_result(
-                video_path, merged_result, output_dir, vis_mode
+            seq_folder = f'{root}/{seq}'
+            img_folder = f'{seq_folder}/extracted_images'
+            os.makedirs(seq_folder, exist_ok=True)
+            os.makedirs(img_folder, exist_ok=True)
+            print(f'Running detect_track on {file} ...')
+
+            ##### Extract Frames #####
+            def extract_frames(video_path, output_folder):
+                if not os.path.exists(output_folder):
+                    os.makedirs(output_folder)
+
+                command = [
+                    'ffmpeg',
+                    '-i', video_path,
+                    '-vf', 'fps=30',
+                    '-start_number', '0',
+                    os.path.join(output_folder, '%04d.jpg')
+                ]
+
+                subprocess.run(command, check=True)
+            imgfiles = natsorted(glob.glob(f'{img_folder}/*.jpg'))
+            if len(imgfiles) > 0:
+                print("Skip extracting frames")
+            else:
+                _ = extract_frames(file, img_folder)
+            imgfiles = natsorted(glob.glob(f'{img_folder}/*.jpg'))
+            result_render = merged_result['smoothed_result'] if self.smooth_hands or self.smooth_camera else merged_result
+            rendered_video = self._render(
+                result=result_render,
+                imgfiles=imgfiles,
+                vis_start=0,
+                vis_end=len(imgfiles) - 1,
+                output_dir=output_dir,
+                vis_mode=vis_mode,
+                video_path=video_path,
             )
-            merged_result["rendered_video"] = rendered_video_path
+            merged_result["seq_folder"]=seq_folder
+            merged_result["rendered_video"] = rendered_video
 
-            if self.verbose and rendered_video_path:
-                print(f"[HaWoRChunk] 渲染视频已保存: {rendered_video_path}")
+            merged_result["rendered_video"] = rendered_video
+
+            if self.verbose and rendered_video:
+                print(f"[HaWoRChunk] 渲染视频已保存: {rendered_video}")
 
         return merged_result
 
@@ -234,7 +276,8 @@ class HaWoRPipelineChunk(HaWoRPipeline):
         self,
         chunk_results: list[tuple[int, int, dict]],
         chunk_ranges: list[tuple[int, int]],
-        overlap_frames: int
+        overlap_frames: int,
+        smoothed: bool = False
     ) -> dict:
         """
         合并多个分块的结果。
@@ -268,6 +311,8 @@ class HaWoRPipelineChunk(HaWoRPipeline):
 
         # 处理每个分块
         for chunk_idx, (chunk_start, chunk_end, chunk_result) in enumerate(chunk_results):
+            if smoothed:
+                chunk_result = chunk_result.get("smoothed_result", chunk_result)
             chunk_length = chunk_end - chunk_start
 
             # 计算要复制的范围（处理重叠）
@@ -418,11 +463,6 @@ class HaWoRPipelineChunk(HaWoRPipeline):
         merged["seq_folder"] = None
         merged["smooth_hand_enabled"] = first_result.get("smooth_hand_enabled", False)
         merged["smooth_camera_enabled"] = first_result.get("smooth_camera_enabled", False)
-
-        # 处理平滑结果（如果有）
-        if "smoothed_result" in first_result:
-            # 类似地合并平滑结果...
-            merged["smoothed_result"] = merged  # 简化处理
 
         return merged
 
