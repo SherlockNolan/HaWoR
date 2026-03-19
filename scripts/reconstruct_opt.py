@@ -102,14 +102,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--progress-bar", action="store_true",
         help="显示重建各阶段的总体进度条（平均分配到 4 或 5 个阶段）",
     )
-    parser.add_argument(
-        "--chunk_size", type=int, default=1000,
-        help="分段chunk大小",
-    )
-    parser.add_argument(
-        "--overlap_frames", type=int, default=120,
-        help="分段chunk大小",
-    )
     return parser
 
 

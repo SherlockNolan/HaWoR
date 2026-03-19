@@ -40,6 +40,10 @@ from HaWoRPipeline import (
     LazyVideoFrames
 )
 
+sys.path.insert(0, 'thirdparty/DROID-SLAM/droid_slam')
+sys.path.insert(0, 'thirdparty/DROID-SLAM')
+from droid import Droid
+
 from lib.pipeline.tools import parse_chunks, parse_chunks_hand_frame
 from lib.eval_utils.custom_utils import cam2world_convert, load_slam_cam, quaternion_to_matrix
 from lib.eval_utils.custom_utils import interpolate_bboxes
@@ -123,6 +127,10 @@ class HaWoRPipelineOpt(HaWoRPipeline):
         if self.verbose:
             print(f'[HaWoROpt] Running optimized slam ...')
 
+        # 重要：确保 masks 是 torch tensor（可能从 _hawor_motion_estimation 传入的是 numpy）
+        if isinstance(masks, np.ndarray):
+            masks = torch.from_numpy(masks)
+
         # 初始化进度（10%）
         self._update_stage_progress(10)
 
@@ -150,6 +158,7 @@ class HaWoRPipelineOpt(HaWoRPipeline):
         all_tstamps = []
         all_disps = []
         all_scales = []
+        all_traj = []  # 保存每个分块的轨迹
 
         # 分块处理 SLAM
         for chunk_start in range(0, total_frames, self.chunk_size_slam):
@@ -235,6 +244,7 @@ class HaWoRPipelineOpt(HaWoRPipeline):
             all_tstamps.append(tstamp_chunk + chunk_start)  # 转换为全局索引
             all_disps.append(disps_chunk)
             all_scales.extend(scales_chunk)
+            all_traj.append(traj_chunk)  # 保存轨迹
 
             # 释放当前分块的 Droid 和中间变量
             del droid, traj_chunk, tstamp_chunk, disps_chunk, scales_chunk
@@ -263,29 +273,16 @@ class HaWoRPipelineOpt(HaWoRPipeline):
         slam_results = {
             "tstamp": tstamp,
             "disps": disps,
-            "traj": None,  # 需要重新构建
+            "traj": np.concatenate(all_traj) if all_traj else np.array([]),
             "img_focal": focal,
             "img_center": calib[-2:],
             "scale": median_s,
         }
 
-        # 重建 traj（从 disps 重建）
-        # 注意：这里简化处理，假设 traj 可以从 disps 推断
-        # 实际使用时可能需要调整
-        slam_results["traj"] = self._reconstruct_traj_from_disps(disps, tstamp, median_s)
+        # 清理临时变量
+        del all_traj
 
         return slam_results
-
-    def _reconstruct_traj_from_disps(self, disps, tstamp, scale):
-        """
-        从 disps 重建轨迹。
-        这是一个简化版本，实际可能需要更复杂的逻辑。
-        """
-        # 简化：返回零矩阵作为占位
-        # 实际使用时，traj 的格式应该是 (N, 7) [tx, ty, tz, qx, qy, qz, qw]
-        n = len(tstamp)
-        traj = np.zeros((n, 7))
-        return traj
 
     def _hawor_infiller(self, images_BGR, frame_chunks_all, slam_cam, pred_hand_json):
         """
