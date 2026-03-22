@@ -23,7 +23,7 @@ HaWoR (World-Space Hand Motion Reconstruction from Egocentric Videos) is a CVPR 
 
 编写代码时提供必要的注释，遵守良好的设计模式原则。
 
-思考推荐使用英文。注释和最后的总结回答推荐使用中文。
+思考使用英文。注释和最后的总结回答推荐使用中文。
 
 编辑单个文件的时候不要写README.md，基本用法通过注释的方式写在编辑的代码文件的底端。不需要考虑环境问题，如有需要安装的python包则一并写在注释中。
 
