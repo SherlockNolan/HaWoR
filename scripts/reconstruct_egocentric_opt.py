@@ -297,7 +297,7 @@ def process_video_worker_proc(
 
         
         with _suppress_all_output(enabled=True):
-                result_dict_origin = _process_pipe.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031, frame_start_idx=frame_start_idx, frame_end_idx=frame_end_idx) # 屏蔽原有输出
+                result_dict_origin = _process_pipe.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031, start_idx=frame_start_idx, end_idx=frame_end_idx) # 屏蔽原有输出
                 result_dict = dict()
                 # Ensure adapter is imported in this process
                 if globals().get("convert_hawor_to_keypoints") is None:
@@ -359,7 +359,7 @@ def process_video_worker(video_path, pipe, extra_args=None):
         os.makedirs(pkl_dir, exist_ok=True)
     try:
         with _suppress_all_output(enabled=True):
-            result_dict_origin = pipe.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031, frame_start_idx=frame_start_idx, frame_end_idx=frame_end_idx)
+            result_dict_origin = pipe.reconstruct(video_path, output_dir=pkl_dir, image_focal=1031, start_idx=frame_start_idx, end_idx=frame_end_idx)
             result_dict = dict()
             # Ensure adapter available in this process
             if globals().get("convert_hawor_to_keypoints") is None:
