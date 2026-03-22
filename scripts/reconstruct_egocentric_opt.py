@@ -731,6 +731,11 @@ def main():
         default=1,
         help="Number of CPU processes to use for parallel processing. Use 1 for sequential execution.",
     )
+    parser.add_argument(
+        "--inverse",
+        action="store_true",
+        help="Reverse the final video list. Useful for running multiple processes head-to-tail to cover the full dataset.",
+    )
 
     args = parser.parse_args()
     
@@ -765,6 +770,9 @@ def main():
         selected_vid_list = all_vid_list[
             args.start : args.end
         ]  # todo: 重新处理排序逻辑，使得每个factory的worker的视频首先被遍历一次
+        if args.inverse:
+            selected_vid_list = selected_vid_list[::-1]
+            print("Video list reversed (--inverse enabled).")
         print(f"Process: {len(selected_vid_list)}")
         print("Selected Videos:")
         print(selected_vid_list[:10])

@@ -2,18 +2,19 @@
 
 # HaWoR: World-Space Hand Motion Reconstruction from Egocentric Videos
 
-[Jinglei Zhang]()<sup>1</sup> &emsp; [Jiankang Deng](https://jiankangdeng.github.io/)<sup>2</sup> &emsp; [Chao Ma](https://scholar.google.com/citations?user=syoPhv8AAAAJ&hl=en)<sup>1</sup> &emsp; [Rolandos Alexandros Potamias](https://rolpotamias.github.io)<sup>2</sup> &emsp;  
+[Jinglei Zhang]()`<sup>`1`</sup>` &emsp; [Jiankang Deng](https://jiankangdeng.github.io/)`<sup>`2`</sup>` &emsp; [Chao Ma](https://scholar.google.com/citations?user=syoPhv8AAAAJ&hl=en)`<sup>`1`</sup>` &emsp; [Rolandos Alexandros Potamias](https://rolpotamias.github.io)`<sup>`2`</sup>` &emsp;
 
-<sup>1</sup>Shanghai Jiao Tong University, China
-<sup>2</sup>Imperial College London, UK <br>
+`<sup>`1`</sup>`Shanghai Jiao Tong University, China
+`<sup>`2`</sup>`Imperial College London, UK `<br>`
 
-<font color="blue"><strong>CVPR 2025 Highlight✨</strong></font>
+`<font color="blue"><strong>`CVPR 2025 Highlight✨`</strong></font>`
 
-<a href='https://arxiv.org/abs/2501.02973'><img src='https://img.shields.io/badge/Arxiv-2501.02973-A42C25?style=flat&logo=arXiv&logoColor=A42C25'></a>
-<a href='https://arxiv.org/pdf/2501.02973'><img src='https://img.shields.io/badge/Paper-PDF-yellow?style=flat&logo=arXiv&logoColor=yellow'></a>
-<a href='https://hawor-project.github.io/'><img src='https://img.shields.io/badge/Project-Page-%23df5b46?style=flat&logo=Google%20chrome&logoColor=%23df5b46'></a>
-<a href='https://github.com/ThunderVVV/HaWoR'><img src='https://img.shields.io/badge/GitHub-Code-black?style=flat&logo=github&logoColor=white'></a>
-<a href='https://huggingface.co/spaces/ThunderVVV/HaWoR'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-green'></a>
+`<a href='https://arxiv.org/abs/2501.02973'><img src='https://img.shields.io/badge/Arxiv-2501.02973-A42C25?style=flat&logo=arXiv&logoColor=A42C25'>``</a>`
+`<a href='https://arxiv.org/pdf/2501.02973'><img src='https://img.shields.io/badge/Paper-PDF-yellow?style=flat&logo=arXiv&logoColor=yellow'>``</a>`
+`<a href='https://hawor-project.github.io/'><img src='https://img.shields.io/badge/Project-Page-%23df5b46?style=flat&logo=Google%20chrome&logoColor=%23df5b46'>``</a>`
+`<a href='https://github.com/ThunderVVV/HaWoR'><img src='https://img.shields.io/badge/GitHub-Code-black?style=flat&logo=github&logoColor=white'>``</a>`
+`<a href='https://huggingface.co/spaces/ThunderVVV/HaWoR'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-green'>``</a>`
+
 </div>
 
 This is the official implementation of **[HaWoR](https://hawor-project.github.io/)**, a hand reconstruction model in the world coordinates:
@@ -26,9 +27,12 @@ This is the official implementation of **[HaWoR](https://hawor-project.github.io
 
 **升级到CU12+**：
 
-**使用**`pip install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@stable#egg=pytorch3d`这个指令来安装`pytorch3d`！同时我已经更新到cu124版本的torch！
+写在最前：DROID-SLAM的 `setup.py`好像写错了，两个setup，只会编译第二个，而且没有适配H200的CUDA版本的指令集。目前已经修复。
 
-chumpy同理`pip install --no-build-isolation git+https://github.com/mattloper/chumpy`
+
+**使用** `pip install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@stable#egg=pytorch3d`这个指令来安装 `pytorch3d`！同时我已经更新到cu124版本的torch！
+
+chumpy同理 `pip install --no-build-isolation git+https://github.com/mattloper/chumpy`
 
 mmcv单独处理，之前的版本太老了 `pip install mmcv==2.0.0 -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html`
 
@@ -38,7 +42,6 @@ mmcv单独处理，之前的版本太老了 `pip install mmcv==2.0.0 -f https://
 apt update
 apt install ffmeg
 ```
-
 
 ```
 git clone --recursive https://github.com/ThunderVVV/HaWoR.git
@@ -112,7 +115,6 @@ Parts of the code are taken or adapted from the following repos:
 - [SLAHMR](https://github.com/vye16/slahmr)
 - [TRAM](https://github.com/yufu-wang/tram)
 - [CMIB](https://github.com/jihoonerd/Conditional-Motion-In-Betweening)
-
 
 ## License
 
