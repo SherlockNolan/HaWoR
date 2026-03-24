@@ -31,13 +31,24 @@ python scripts/reconstruct_egocentric.py --video-path=\
 python scripts/reconstruct_egocentric.py \
     --output="results/" \
     --num-workers=4 --test
-    
+
+# 2
 python scripts/reconstruct_egocentric_opt.py \
     --start=0 --end=100000 --frame-end-idx=2000 \
-    --num-workers=40
+    --num-workers=72
+
+python scripts/reconstruct_egocentric_opt.py \
+    --start=0 --end=100000 --frame-end-idx=2000 \
+    --num-workers=32 --inverse
+
+# 3
 python scripts/reconstruct_egocentric_opt.py \
     --start=100000 --end=200000 --frame-end-idx=2000 \
-    --num-workers=40
+    --num-workers=72
+
+python scripts/reconstruct_egocentric_opt.py \
+    --start=100000 --end=200000 --frame-end-idx=2000 \
+    --num-workers=32 --inverse
 
 24 
 100不行
@@ -305,7 +316,8 @@ def process_video_worker_proc(
                     globals()["convert_hawor_to_keypoints"] = _convert_fn
                 _convert = globals()["convert_hawor_to_keypoints"]
                 result_dict["original_result"] = _convert(result_dict_origin, video_path, use_smoothed=False)
-                result_dict["smoothed_result"] = _convert(result_dict_origin, video_path, use_smoothed=True)
+                result_dict["smoothed_result"] = _convert(result_dict_origin, video_path, use_smoothed=True) if result_dict_origin["smoothed_result"] is not None else None
+
         # result_dict = _process_pipe.reconstruct(video_path, output_dir=pkl_dir) # 有完整输出信息的
         
         stop_monitoring.set()
@@ -367,7 +379,7 @@ def process_video_worker(video_path, pipe, extra_args=None):
                 globals()["convert_hawor_to_keypoints"] = _convert_fn
             _convert = globals()["convert_hawor_to_keypoints"]
             result_dict["original_result"] = _convert(result_dict_origin, video_path, use_smoothed=False)
-            result_dict["smoothed_result"] = _convert(result_dict_origin, video_path, use_smoothed=True)
+            result_dict["smoothed_result"] = _convert(result_dict_origin, video_path, use_smoothed=True) if result_dict["smoothed_result"] is not None else None
 
         if result_dict:
             with open(pkl_path, "wb") as f:

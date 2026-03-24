@@ -1241,32 +1241,40 @@ class HaWoRPipelineOpt:
         self._complete_stage()
 
         # ── Step 5: 抖动检测与平滑 ────────────────────────────────────────
-        pred_trans_smooth, pred_rot_smooth, pred_hand_pose_smooth = (None, None, None)
-        if self.smooth_hands:
+        is_smooth_failed = False
+        try:
+            pred_trans_smooth, pred_rot_smooth, pred_hand_pose_smooth = (None, None, None)
+            if self.smooth_hands:
+                if self.verbose:
+                    print("[HaWoR] Step 5a — Smoothing hand predictions (MAD jitter detection + Gaussian)")
+                pred_trans_smooth, pred_rot_smooth, pred_hand_pose_smooth = smooth_hand_predictions(
+                    pred_trans, pred_rot, pred_hand_pose, pred_valid,
+                    jitter_thresh_k=self.jitter_thresh_k_hands,
+                    smooth_sigma_trans=self.smooth_sigma_trans,
+                    smooth_sigma_rot=self.smooth_sigma_rot,
+                    smooth_sigma_pose=self.smooth_sigma_pose,
+                    verbose=self.verbose,
+                )
+ 
+            R_c2w_sla_all_smooth, t_c2w_sla_all_smooth, R_w2c_sla_all_smooth, t_w2c_sla_all_smooth = (None, None, None, None)
+            if self.smooth_camera:
+                if self.verbose:
+                    print("[HaWoR] Step 5b — Smoothing camera trajectory (MAD jitter detection + Gaussian)")
+                R_c2w_sla_all_smooth, t_c2w_sla_all_smooth = smooth_camera_trajectory(
+                    R_c2w_sla_all, t_c2w_sla_all,
+                    jitter_thresh_k=self.jitter_thresh_k_cam,
+                    smooth_sigma=self.smooth_sigma_cam,
+                    verbose=self.verbose,
+                )
+                R_w2c_sla_all_smooth = R_c2w_sla_all_smooth.transpose(-1, -2)
+                t_w2c_sla_all_smooth = -torch.einsum("bij,bj->bi", R_w2c_sla_all_smooth, t_c2w_sla_all_smooth)
+        except Exception as e:
             if self.verbose:
-                print("[HaWoR] Step 5a — Smoothing hand predictions (MAD jitter detection + Gaussian)")
-            pred_trans_smooth, pred_rot_smooth, pred_hand_pose_smooth = smooth_hand_predictions(
-                pred_trans, pred_rot, pred_hand_pose, pred_valid,
-                jitter_thresh_k=self.jitter_thresh_k_hands,
-                smooth_sigma_trans=self.smooth_sigma_trans,
-                smooth_sigma_rot=self.smooth_sigma_rot,
-                smooth_sigma_pose=self.smooth_sigma_pose,
-                verbose=self.verbose,
-            )
-
-        R_c2w_sla_all_smooth, t_c2w_sla_all_smooth, R_w2c_sla_all_smooth, t_w2c_sla_all_smooth = (None, None, None, None)
-        if self.smooth_camera:
-            if self.verbose:
-                print("[HaWoR] Step 5b — Smoothing camera trajectory (MAD jitter detection + Gaussian)")
-            R_c2w_sla_all_smooth, t_c2w_sla_all_smooth = smooth_camera_trajectory(
-                R_c2w_sla_all, t_c2w_sla_all,
-                jitter_thresh_k=self.jitter_thresh_k_cam,
-                smooth_sigma=self.smooth_sigma_cam,
-                verbose=self.verbose,
-            )
-            R_w2c_sla_all_smooth = R_c2w_sla_all_smooth.transpose(-1, -2)
-            t_w2c_sla_all_smooth = -torch.einsum("bij,bj->bi", R_w2c_sla_all_smooth, t_c2w_sla_all_smooth)
-
+                print(f"[HaWoR] Warning: smooth_hand_predictions failed: {e}")
+            pred_trans_smooth, pred_rot_smooth, pred_hand_pose_smooth = (None, None, None)
+            R_c2w_sla_all_smooth, t_c2w_sla_all_smooth, R_w2c_sla_all_smooth, t_w2c_sla_all_smooth = (None, None, None, None)
+            is_smooth_failed = True
+        
         # Update overall progress after smoothing stage if enabled
         if smoothing_enabled:
             self._start_stage("Smoothing", total_steps=100, desc="Smoothing")
@@ -1287,7 +1295,7 @@ class HaWoRPipelineOpt:
             vis_start, vis_end, faces_right, faces_left
         )
         right_dict_smooth, left_dict_smooth = (None, None)
-        if self.smooth_hands:
+        if self.smooth_hands and not is_smooth_failed:
             right_dict_smooth, left_dict_smooth = self._build_hand_dicts(
                 pred_trans_smooth, pred_rot_smooth, pred_hand_pose_smooth, pred_betas,
                 vis_start, vis_end, faces_right, faces_left
@@ -1301,7 +1309,7 @@ class HaWoRPipelineOpt:
             right_dict, left_dict, R_c2w_sla_all, t_c2w_sla_all
         )
          
-        if self.smooth_hands or self.smooth_camera:
+        if self.smooth_hands or self.smooth_camera and not is_smooth_failed:
             if not self.smooth_hands:
                 right_dict_smooth, left_dict_smooth = right_dict.copy(), left_dict.copy()
             if not self.smooth_camera:
@@ -1330,8 +1338,8 @@ class HaWoRPipelineOpt:
             rendered_video=None,
             seq_folder=None,
             
-            smooth_hand_enabled=self.smooth_hands,
-            smooth_camera_enabled=self.smooth_camera,
+            smooth_hand_enabled=self.smooth_hands if not is_smooth_failed else False,
+            smooth_camera_enabled=self.smooth_camera if not is_smooth_failed else False,
             
             # 使用了smooth的结果
             smoothed_result = dict(
@@ -1349,7 +1357,7 @@ class HaWoRPipelineOpt:
                 img_focal=image_focal,
                 rendered_video=None,
                 seq_folder=None,
-            ),
+            ) if not is_smooth_failed else None,
         )
 
         # ── 可选：渲染 mp4 ───────────────────────────────────────────────

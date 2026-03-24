@@ -4,7 +4,8 @@ HaWoRPipeline 性能测试脚本
 测试不同 end_idx (1k, 10k, 100k, 1m) 下的内存占用和运行时间。
 
 Usage:
-    python scripts/test_pipeline_performance.py --video_path /inspire/dataset/egocentric-10k/v20251211/factory_001/workers/worker_001/factory001_worker001_00000.mp4 --output_dir ./results
+    python scripts/test_pipeline_performance.py --video_path /inspire/dataset/egocentric-10k/v20251211/factory_001/workers/worker_001/factory001_worker001_00000.mp4 \
+        --output_dir ./results --end_indices="1000"
 """
 
 import argparse
