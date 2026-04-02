@@ -470,7 +470,8 @@ class HaWoRPipelineOpt:
         # 10000帧1080p: ~20GB 内存 → 磁盘存储，内存仅缓存访问页
         # 临时文件存储在 ./tmp/ 目录下，使用唯一前缀
         import uuid
-        tmp_dir = os.path.join(os.getcwd(), 'tmp')
+        # tmp_dir = os.path.join(os.getcwd(), 'tmp')
+        tmp_dir = os.path.join("/inspire/qb-ilm/project/robot-reasoning/xuyue-p-xuyue/zy", 'tmp')
         os.makedirs(tmp_dir, exist_ok=True)
         unique_prefix = f"mask_{uuid.uuid4().hex[:8]}"
         tmp_file_path = os.path.join(tmp_dir, f"{unique_prefix}.dat")
@@ -1309,7 +1310,7 @@ class HaWoRPipelineOpt:
             right_dict, left_dict, R_c2w_sla_all, t_c2w_sla_all
         )
          
-        if self.smooth_hands or self.smooth_camera and not is_smooth_failed:
+        if (self.smooth_hands or self.smooth_camera) and not is_smooth_failed:
             if not self.smooth_hands:
                 right_dict_smooth, left_dict_smooth = right_dict.copy(), left_dict.copy()
             if not self.smooth_camera:

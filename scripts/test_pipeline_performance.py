@@ -5,7 +5,7 @@ HaWoRPipeline 性能测试脚本
 
 Usage:
     python scripts/test_pipeline_performance.py --video_path /inspire/dataset/egocentric-10k/v20251211/factory_001/workers/worker_001/factory001_worker001_00000.mp4 \
-        --output_dir ./results --end_indices="1000"
+        --output_dir ./results --end_indices="200"
 """
 
 import argparse
@@ -94,7 +94,7 @@ def init_pipeline(device: str):
     time_start = time.time()
 
     cfg = HaWoRConfig(
-        verbose=False,
+        verbose=True,
         device=device,
         smooth_hands=True,
         smooth_camera=True,

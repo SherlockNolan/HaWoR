@@ -37,10 +37,6 @@ python scripts/reconstruct_egocentric_opt.py \
     --start=0 --end=100000 --frame-end-idx=2000 \
     --num-workers=72
 
-python scripts/reconstruct_egocentric_opt.py \
-    --start=0 --end=100000 --frame-end-idx=2000 \
-    --num-workers=32 --inverse
-
 # 3
 python scripts/reconstruct_egocentric_opt.py \
     --start=100000 --end=200000 --frame-end-idx=2000 \
