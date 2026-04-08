@@ -75,6 +75,7 @@ DEFAULT_DATASET_ROOT_TEST = "./test_video"
 DEFAULT_OUTPUT_ROOT_TEST = (
     "./test_results"
 )
+DEFAULT_TMP_DIR = None  # None 表示使用 HaWoRConfig 的默认值（当前工作目录下的 ./tmp）
 
 # 用于传递额外参数的 dict，替代全局变量
 
@@ -182,7 +183,8 @@ def _suppress_all_output(enabled=True):
                 os.close(saved_stderr_fd)
 
 def _worker_process_main(
-    worker_id: int, device_str: str, dtype, task_queue, result_queue, init_queue
+    worker_id: int, device_str: str, dtype, task_queue, result_queue, init_queue,
+    extra_args=None,
 ):
     """自定义进程工作函数：每个进程绑定指定 GPU，循环从任务队列取任务执行。
 
@@ -226,7 +228,8 @@ def _worker_process_main(
         raise
 
     # 使用 HaWoRPipeline
-    cfg = HaWoRConfig(verbose=False, device=device_str)
+    _tmp_dir = (extra_args or {}).get("tmp_dir")
+    cfg = HaWoRConfig(verbose=False, device=device_str, tmp_dir=_tmp_dir)
     _process_pipe = HaWoRPipelineOpt(cfg)
     
     # 通知主进程：本 Worker 初始化完成
@@ -501,7 +504,7 @@ def process_multi_workers(args, dtype, selected_vid_list, extra_args=None):
     for wid, dev_str in enumerate(device_assignments):
         p = mp_ctx.Process(
             target=_worker_process_main,
-            args=(wid, dev_str, dtype, task_queue, result_queue, init_queue),
+            args=(wid, dev_str, dtype, task_queue, result_queue, init_queue, extra_args),
             daemon=True,
             name=f"Worker-{wid}",
         )
@@ -750,6 +753,12 @@ def main():
         action="store_true",
         help="Reverse the final video list. Useful for running multiple processes head-to-tail to cover the full dataset.",
     )
+    parser.add_argument(
+        "--tmp-dir",
+        type=str,
+        default=DEFAULT_TMP_DIR,
+        help="临时文件目录（memmap 等）。默认为 None，使用 HaWoRConfig 默认值（./tmp）。",
+    )
 
     args = parser.parse_args()
     
@@ -763,7 +772,8 @@ def main():
         "output_root": args.output,
         "save_origin": args.save_origin,
         "frame_start_idx": args.frame_start_idx,
-        "frame_end_idx": args.frame_end_idx
+        "frame_end_idx": args.frame_end_idx,
+        "tmp_dir": args.tmp_dir,
     }
     
 
@@ -814,7 +824,7 @@ def main():
         # Sequential mode: import HaWoR here (after deciding not to spawn workers)
         from lib.pipeline.HaWoRPipelineOpt import HaWoRPipelineOpt, HaWoRConfig
         from lib.pipeline.HaworToKeypointsAdapter import convert_hawor_to_keypoints
-        cfg = HaWoRConfig(verbose=False)
+        cfg = HaWoRConfig(verbose=False, tmp_dir=extra_args.get("tmp_dir"))
         pipe = HaWoRPipelineOpt(cfg)
         for video_path in tqdm(
             selected_vid_list, desc="Processing videos", unit="video"

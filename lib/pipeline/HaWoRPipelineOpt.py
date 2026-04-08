@@ -1,3 +1,8 @@
+"""
+原始的HaWoRPipeline类经过内存优化后的版本，主要是把tmp_masks改为np.memmap，避免大数组驻留内存，改为磁盘存储，内存仅缓存访问页。适用于长视频或高分辨率视频的处理。
+"""
+
+
 import math
 import os
 import sys
