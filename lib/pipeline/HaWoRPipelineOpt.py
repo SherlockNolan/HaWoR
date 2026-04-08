@@ -101,6 +101,7 @@ class HaWoRPipelineOpt:
         self.infiller_weight = cfg.infiller_weight
         self.verbose = cfg.verbose
         self.device = cfg.device
+        self.tmp_dir = cfg.tmp_dir
         
 
         # ── 加载模型 ───────────────────────────────────────────────────
@@ -470,8 +471,11 @@ class HaWoRPipelineOpt:
         # 10000帧1080p: ~20GB 内存 → 磁盘存储，内存仅缓存访问页
         # 临时文件存储在 ./tmp/ 目录下，使用唯一前缀
         import uuid
-        # tmp_dir = os.path.join(os.getcwd(), 'tmp')
-        tmp_dir = os.path.join("/inspire/qb-ilm/project/robot-reasoning/xuyue-p-xuyue/zy", 'tmp')
+        if self.tmp_dir:
+            tmp_dir = self.tmp_dir
+        else:
+            tmp_dir = os.path.join(os.getcwd(), 'tmp')
+        # tmp_dir = os.path.join("/inspire/qb-ilm/project/robot-reasoning/xuyue-p-xuyue/zy", 'tmp')
         os.makedirs(tmp_dir, exist_ok=True)
         unique_prefix = f"mask_{uuid.uuid4().hex[:8]}"
         tmp_file_path = os.path.join(tmp_dir, f"{unique_prefix}.dat")

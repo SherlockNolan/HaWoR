@@ -648,6 +648,7 @@ class HaWoRConfig:
     metric_3D_path: str = "thirdparty/Metric3D/weights/metric_depth_vit_large_800k.pth"
     detector_path: str = "./weights/external/detector.pt"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"  # "cuda" 或 "cpu" 或者自定义哪个具体的GPU
+    tmp_dir: Optional[str] = None # 默认在当前工作目录下面
 
     # ── 运行配置 ─────────────────────────────────────────────────────
     verbose: bool = False

@@ -57,6 +57,12 @@ python scripts/reconstruct_egocentric.py \
 python scripts/reconstruct_egocentric.py \
     --start=100007 --end=100015 \
     --num-workers=2
+    
+# 3号环境最终版本：
+python scripts/reconstruct_egocentric_opt.py \
+    --start=0 --end=200000 --frame-end-idx=2000 \
+    --num-workers=72
+
 """
 
 
