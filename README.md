@@ -23,25 +23,8 @@ This is the official implementation of **[HaWoR](https://hawor-project.github.io
 
 ## Installation
 
-### Installation
+### Installation (CU12+)
 
-**升级到CU12+**：
-
-写在最前：DROID-SLAM的 `setup.py`好像写错了，两个setup，只会编译第二个，而且没有适配H200的CUDA版本的指令集。目前已经修复。
-
-
-**使用** `pip install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@stable#egg=pytorch3d`这个指令来安装 `pytorch3d`！同时我已经更新到cu124版本的torch！
-
-chumpy同理 `pip install --no-build-isolation git+https://github.com/mattloper/chumpy`
-
-mmcv单独处理，之前的版本太老了 `pip install mmcv==2.0.0 -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html`
-
-还需要
-
-```bash
-apt update
-apt install ffmeg
-```
 
 ```
 git clone --recursive https://github.com/ThunderVVV/HaWoR.git
@@ -54,12 +37,30 @@ The code has been tested with PyTorch 1.13 and CUDA 11.7. Higher torch and cuda 
 conda create --name hawor python=3.10
 conda activate hawor
 
-pip install torch==1.13.0+cu117 torchvision==0.14.0+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
 # Install requirements
 pip install -r requirements.txt
 pip install pytorch-lightning==2.2.4 --no-deps
 pip install lightning-utilities torchmetrics==1.4.0
+
+pip install ninja
+# 安装适配 CUDA 12.4 的版本 (以 2.4.0 为例)
+pip install torch==2.4.0+cu124 torchvision==0.19.0+cu124 torchaudio==2.4.0+cu124 --extra-index-url https://download.pytorch.org/whl/cu124
 ```
+
+**使用** `pip install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@stable#egg=pytorch3d`这个指令来安装 `pytorch3d`！同时我已经更新到cu124版本的torch！
+
+chumpy同理 `pip install --no-build-isolation git+https://github.com/mattloper/chumpy`
+
+mmcv单独处理，之前的版本太老了 `pip install mmcv==2.0.0 -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html`
+
+还需要
+
+```bash
+sudo apt upgrade
+sudo apt install ffmpeg
+```
+
+
 
 ### Install masked DROID-SLAM
 
@@ -69,6 +70,24 @@ python setup.py install
 ```
 
 Download DROID-SLAM official weights [droid.pth](https://drive.google.com/file/d/1PpqVt1H4maBa_GbPJp4NwxRsd9jk-elh/view?usp=sharing), put it under `./weights/external/`.
+
+
+**检查建议** 
+在重新编译 DROID-SLAM 之前，请务必确认安装成功且版本匹配：
+1. **检查 PyTorch 认领的 CUDA：**
+   ```bash
+   python -c "import torch; print(torch.version.cuda)"
+   ```
+   输出应该是 `12.4`。
+2. **检查编译器 (NVCC) 版本：**
+   ```bash
+   nvcc --version
+   ```
+   输出也应该是 `12.4` 左右。
+
+只有这两个数字“对齐”了，接下来的 `python setup.py install` 或 `pip install -e .` 才能顺利通过。
+
+
 
 ### Install Metric3D
 
@@ -83,10 +102,21 @@ wget https://huggingface.co/ThunderVVV/HaWoR/resolve/main/hawor/checkpoints/infi
 wget https://huggingface.co/ThunderVVV/HaWoR/resolve/main/hawor/model_config.yaml -P ./weights/hawor/
 ```
 
+国内使用
+```bash
+wget https://hf-mirror.com/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/detector.pt -P ./weights/external/
+wget https://hf-mirror.com/ThunderVVV/HaWoR/resolve/main/hawor/checkpoints/hawor.ckpt -P ./weights/hawor/checkpoints/
+wget https://hf-mirror.com/ThunderVVV/HaWoR/resolve/main/hawor/checkpoints/infiller.pt -P ./weights/hawor/checkpoints/
+wget https://hf-mirror.com/ThunderVVV/HaWoR/resolve/main/hawor/model_config.yaml -P ./weights/hawor/
+```
+
+
 It is also required to download MANO model from [MANO website](https://mano.is.tue.mpg.de).
 Create an account by clicking Sign Up and download the models (mano_v*_*.zip). Unzip and put the hand model to the `_DATA/data/mano/MANO_RIGHT.pkl` and `_DATA/data_left/mano_left/MANO_LEFT.pkl`.
 
 Note that MANO model falls under the [MANO license](https://mano.is.tue.mpg.de/license.html).
+
+
 
 ## Demo
 
