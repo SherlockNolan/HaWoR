@@ -37,6 +37,8 @@ def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=
     betas : (optional) B x D
     """
     block_print()
+    if device == "cpu":
+        use_cuda = False
     if not mano:
         MANO_cfg = {
             'DATA_DIR': '_DATA/data/',
@@ -116,6 +118,8 @@ def run_mano_left(trans, root_orient, hand_pose, is_right=None, betas=None, use_
     betas : (optional) B x D
     """
     block_print()
+    if device == "cpu":
+        use_cuda = False
     if not mano:
         MANO_cfg = {
             'DATA_DIR': '_DATA/data_left/',

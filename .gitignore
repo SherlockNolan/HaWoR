@@ -3,6 +3,7 @@
 /results
 /example/video_0
 /weights
+test/*.mp4
 tmp/
 /app_pytorch3d*
 /test_video/

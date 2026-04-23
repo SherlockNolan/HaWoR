@@ -2,5 +2,10 @@
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
     "clangd-lsp@claude-plugins-official": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import pytorch3d; print\\(pytorch3d.__version__\\); from pytorch3d.renderer import MeshRenderer, MeshRasterizer; print\\('PyTorch3D imported OK'\\)\")"
+    ]
   }
 }

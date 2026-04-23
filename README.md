@@ -23,6 +23,39 @@ This is the official implementation of **[HaWoR](https://hawor-project.github.io
 
 ## Installation
 
+### Installing Through UV
+
+```bash
+uv sync --no-build-isolation
+```
+
+在服务器上运行的时候请指定：`~/.config/uv/uv.toml`
+
+```toml
+# uv.toml in qizhi
+preview = true
+
+link-mode = "symlink"
+
+cache-dir = "/inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/zy/cache/uv"
+
+[[index]]
+
+url = "https://pypi.tuna.tsinghua.edu.cn/simple" # 清华源
+
+# url = " https://mirrors.aliyun.com/pypi/simple/"
+
+default = true
+
+```
+
+测试：
+
+```bash
+uv run tests/test_single_video.py --video-path=/inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/zy/HaWoR/example/video_0.mp4
+```
+或者`.venv/bin/python tests/test_single_video.py --video-path=/inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/zy/HaWoR/example/video_0.mp4`
+
 ### Installation (CU12+)
 
 
@@ -64,7 +97,7 @@ sudo apt install ffmpeg
 
 ### Install masked DROID-SLAM
 
-```
+```bash
 cd thirdparty/DROID-SLAM
 python setup.py install
 ```
@@ -86,6 +119,27 @@ Download DROID-SLAM official weights [droid.pth](https://drive.google.com/file/d
    输出也应该是 `12.4` 左右。
 
 只有这两个数字“对齐”了，接下来的 `python setup.py install` 或 `pip install -e .` 才能顺利通过。
+
+
+验证Droid-SLAM安装了支持H200的版本，请在Droid-SLAM目录下面运行：
+
+```bash
+# 验证 droid_backends
+SO_DROID=$(find . -name "droid_backends*.so" | head -n 1)
+echo "Checking $SO_DROID"
+cuobjdump "$SO_DROID" | grep sm_90
+
+# 验证 lietorch_extras (这才是真正的 CorrSampler 所在)
+SO_LIE=$(find . -name "lietorch_extras*.so" | head -n 1)
+echo "Checking $SO_LIE"
+cuobjdump "$SO_LIE" | grep sm_90
+```
+
+关于lietorch无法识别的问题，请在lietorch目录下面运行
+```bash
+python setup.py develop
+```
+因为lietorch还在更新。随着版本更新会有一些变化
 
 
 

@@ -35,7 +35,7 @@ class PoseTrajectoryFiller:
     def __fill(self, tstamps, images, intrinsics):
         """ fill operator """
 
-        tt = torch.as_tensor(tstamps, device="cuda")
+        tt = torch.as_tensor(tstamps, device=self.device)
         images = torch.stack(images, 0)
         intrinsics = torch.stack(intrinsics, 0)
         inputs = images[:,:,[2,1,0]].to(self.device) / 255.0
@@ -70,8 +70,8 @@ class PoseTrajectoryFiller:
         # self.video.append(tstamp, image[0], None, None, depth, intrinsics / 8.0, gmap, net[0], inp[0], mask)
 
         graph = FactorGraph(self.video, self.update)
-        graph.add_factors(t0.cuda(), torch.arange(N, N+M).cuda())
-        graph.add_factors(t1.cuda(), torch.arange(N, N+M).cuda())
+        graph.add_factors(t0.to(self.device), torch.arange(N, N+M, device=self.device))
+        graph.add_factors(t1.to(self.device), torch.arange(N, N+M, device=self.device))
         # print('graph.ii:', graph.ii)
         # print('graph.jj:', graph.jj)
         # print()

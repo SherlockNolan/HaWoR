@@ -1,0 +1,100 @@
+[project]
+name = "hawor"
+version = "0.1.0"
+description = "Embodied AI research project"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "setuptools<82.0.0", # 大于此版本会报错
+    "torch==2.4.0",
+    "torchvision==0.19.0",
+    "torchaudio==2.4.0",
+    "pytorch-lightning==2.2.4",
+    "lightning-utilities",
+    "torchmetrics==1.4.0",
+    "ninja",
+    # 自动关联本地第三方库
+    "numpy==1.26.4",
+    "opencv-python",
+    "pyrender",
+    "scikit-image",
+    "smplx==0.1.28",
+    "yacs",
+    "timm",
+    "einops",
+    "xtcocotools",
+    "pandas",
+    "hydra-core",
+    "hydra-submitit-launcher",
+    "hydra-colorlog",
+    "pyrootutils",
+    "rich",
+    "webdataset",
+    "ultralytics",
+    "pulp",
+    "supervision",
+    "pycocotools",
+    "joblib",
+    "natsort",
+    "evo",
+    "pytorch-minimize",
+    "mmengine==0.10.4",
+    "html4vision",
+    "plyfile",
+    "aitviewer",
+    "easydict",
+    "loguru",
+    "dill",
+    "lapx",
+    "moderngl-window==2.4.6",
+    # 自动关联本地第三方库
+    "droid-slam",
+    "lietorch",
+    "torch-scatter>=2.1.2",
+    # git
+    "pip",
+    "pytorch3d",         # 对应下方的 sources 
+    "chumpy",            # 对应下方的 sources
+    "mmcv",
+]
+
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+no-build-isolation = true
+# 2. 核心：强制 uv 只解析当前平台的依赖，跳过 aarch64 等无关平台的检查
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+# 3. 本地可编辑安装（解决短横线路径与 import 识别问题）
+droid-slam = { path = "thirdparty/DROID-SLAM", editable = true }
+lietorch = { path = "thirdparty/DROID-SLAM/thirdparty/lietorch", editable = true }
+
+# 1. Pytorch3D: 使用指定的 Git 仓库和分支
+pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "stable" }
+
+# 2. Chumpy: 使用 Git 仓库
+chumpy = { git = "https://github.com/mattloper/chumpy" }
+
+# 3. MMCV: 强制从 OpenMMLab 官方编译库寻找 (注意：官网目前 cu124 的 prebuilt 可能较少，建议显式指定源)
+# 1. 核心修改：直接给 uv 一个准确的下载地址，不再通过 index 查找
+mmcv = { url = "https://download.openmmlab.com/mmcv/dist/cu121/torch2.4.0/mmcv-2.2.0-cp310-cp310-manylinux1_x86_64.whl" }
+
+# 4. 强制指定 Torch 从 CUDA 12.4 源下载，防止下到 CPU 版本
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124" # 使用镜像源代替："https://download.pytorch.org/whl/cu124" "https://mirror.nju.edu.cn/pytorch/whl/cu124/" 
+explicit = true
+
+[[tool.uv.index]]
+name = "openmmlab"
+# 映射到最新的 cu124/torch2.4 对应目录，如果官方没出 prebuilt，uv 会在本地 fallback 到源码编译
+url = "https://download.openmmlab.com/mmcv/dist/cu121/torch2.4/index.html"
+explicit = true
+
+[tool.uv.extra-build-dependencies]
+droid-slam = ["setuptools"]
+

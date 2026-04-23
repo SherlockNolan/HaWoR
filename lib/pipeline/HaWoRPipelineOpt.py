@@ -155,6 +155,7 @@ class HaWoRPipelineOpt:
             disable_vis=True,
             stereo=False,
             upsample=True,
+            device=self.device,  # 支持 CPU/GPU 运行
             # DROID-SLAM 核心参数
             beta=0.3,
             filter_thresh=cfg.droid_filter_thresh,
@@ -612,10 +613,11 @@ class HaWoRPipelineOpt:
                 data_out["init_hand_pose"] = rotation_matrix_to_angle_axis(data_out["init_hand_pose"])
                 if do_flip:  # left
                     outputs = run_mano_left(data_out["init_trans"], data_out["init_root_orient"],
-                                            data_out["init_hand_pose"], betas=data_out["init_betas"])
+                                            data_out["init_hand_pose"], betas=data_out["init_betas"],
+                                            device=self.device)
                 else:  # right
                     outputs = run_mano(data_out["init_trans"], data_out["init_root_orient"], data_out["init_hand_pose"],
-                                       betas=data_out["init_betas"])
+                                       betas=data_out["init_betas"], device=self.device)
 
                 vertices = outputs["vertices"][0].cpu()  # (T, N, 3)
                 for img_i, _ in enumerate(img_ck):
@@ -762,7 +764,7 @@ class HaWoRPipelineOpt:
                                             total=n_strided, desc="SLAM tracking"):
             if droid is None:
                 self.args_droid.image_size = [image.shape[2], image.shape[3]]
-                droid = Droid(self.args_droid)
+                droid = Droid(self.args_droid, device=self.args_droid.device)
 
             # ── 惰性 resize：只对当前帧的 mask 做 resize，不分配全量数组 ──
             # masks 可能是 numpy memmap，按需读取单帧并转换为 torch tensor
@@ -843,7 +845,8 @@ class HaWoRPipelineOpt:
             print('DBA errors:', droid.backend.errors)
 
         del droid  # 一条视频单独使用一个droid实例！
-        torch.cuda.empty_cache()
+        if self.device != "cpu":
+            torch.cuda.empty_cache()
 
         # SLAM完成 (总进度50%)
         self._update_stage_progress(10)
@@ -1422,9 +1425,10 @@ class HaWoRPipelineOpt:
         
         # 清理临时文件（memmap）
         self._cleanup_temp_files()
-        
+
         # 在处理循环的末尾添加
-        torch.cuda.empty_cache()
+        if self.device != "cpu":
+            torch.cuda.empty_cache()
         gc.collect()
         return result
 

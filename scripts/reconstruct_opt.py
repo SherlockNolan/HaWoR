@@ -16,21 +16,21 @@ reconstruct.py
 注意由于服务器没有显示器，而渲染依赖于显示器（受制于python包aitviewer），如果要渲染必须如下调整
 export MGLW_WINDOW=moderngl_window.context.headless.Window
 export PYOPENGL_PLATFORM=egl
-xvfb-run -a python scripts/reconstruct_chunk.py --video_path example/video_0.mp4 --output_dir ./results --rendering --vis_mode cam
+xvfb-run -a python scripts/reconstruct_opt.py --video_path example/video_0.mp4 --output_dir ./results --rendering --vis_mode cam
 xvfb-run -a python scripts/reconstruct.py --video_path /inspire/hdd/project/robot-reasoning/xuyue-p-xuyue/ziyu/DATASET/Rhos_VR_EgoHands/align_blocks/recording_2026-01-13T12-13-48_remote_0.mp4 --output_dir ./results --rendering --vis_mode cam
 
 
 export MGLW_WINDOW=moderngl_window.context.headless.Window
 export PYOPENGL_PLATFORM=egl
-xvfb-run -a python scripts/reconstruct_chunk.py --video_path example/video_0.mp4 --output_dir ./results --rendering --vis_mode cam --chunk_size=60 --overlap_frames=10
+xvfb-run -a python scripts/reconstruct_opt.py --video_path example/video_0.mp4 --output_dir ./results --rendering --vis_mode cam
 
 export MGLW_WINDOW=moderngl_window.context.headless.Window
 export PYOPENGL_PLATFORM=egl
-xvfb-run -a python scripts/reconstruct_chunk.py --video_path example/factory001_worker001_00000.mp4 --output_dir ./results --rendering --vis_mode cam --chunk_size=500 --overlap_frames=10
+xvfb-run -a python scripts/reconstruct_opt.py --video_path example/video_0.mp4 --output_dir ./results --rendering --vis_mode cam
 
 """
 import argparse
-from lib.pipeline.HaWoRPipelineOpt import HaWoRPipelineOpt
+
 import numpy as np
 from glob import glob
 
@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 import joblib
-
+from lib.pipeline.HaWoRPipelineOpt import HaWoRPipelineOpt
 from scripts.scripts_test_video.detect_track_video import detect_track_video
 from scripts.scripts_test_video.hawor_video import hawor_infiller_plain, hawor_motion_estimation, hawor_infiller
 from scripts.scripts_test_video.hawor_slam import hawor_slam
